@@ -34,6 +34,7 @@ from app.models import (
     BenchmarkTask,
     Experiment,
     ExperimentCombination,
+    HiddenTestCandidate,
     RunEvent,
 )
 from app.models.core import VALID_TRANSITIONS, RunState
@@ -253,10 +254,12 @@ class QueueWorker:
                 self._event(session, run_id, "evaluating", {})
                 session.commit()
 
-            # Skeleton evaluator: a patch was produced. Real evaluators land Stage 5.
             patch_produced = bool(result.patch and result.patch.strip())
             if patch_produced:
                 self._store_patch(run_id, result.patch or "")
+            evaluation = await asyncio.to_thread(
+                self._evaluate, run_id, task_id, result.patch, config
+            )
 
             with self._sessions() as session:
                 run = session.get(BenchmarkRun, run_id)
@@ -281,6 +284,8 @@ class QueueWorker:
                     "model_requests": result.model_requests,
                     "agent_steps": result.agent_steps,
                     "commands_executed": result.commands_executed,
+                    "evaluation_signal": evaluation.get("signal"),
+                    "score": evaluation.get("score"),
                 }
                 self._event(session, run_id, result.status, {"patch_produced": patch_produced})
                 session.commit()
@@ -289,6 +294,52 @@ class QueueWorker:
             if sandboxed and self._sandboxes is not None:
                 await self._sandboxes.cleanup(run_id)
             shutil.rmtree(workspace, ignore_errors=True)
+
+    def _evaluate(
+        self, run_id: str, task_id: str, patch: str | None, config: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Grade the patch on a fresh snapshot (Tension 2) and persist results."""
+        import tempfile
+
+        from sqlalchemy import select as sa_select
+
+        from app.evaluators.engine import EvaluationContext, evaluate
+        from app.models import EvaluationResult
+
+        snapshot_source = config.get("fixture_path")
+        if not snapshot_source:
+            return {"signal": "no_evaluation_configured", "score": None}
+        with self._sessions() as session:
+            hidden = {
+                c.relpath: c.content
+                for c in session.scalars(
+                    sa_select(HiddenTestCandidate).where(
+                        HiddenTestCandidate.task_id == task_id,
+                        HiddenTestCandidate.approved.is_(True),
+                    )
+                )
+            }
+        context = EvaluationContext(
+            patch=patch,
+            snapshot_source=Path(snapshot_source),
+            commands=dict(config.get("commands", {"test": "pytest -v"})),
+            test_framework=config.get("test_framework", "pytest"),
+            baseline_cases=[tuple(c) for c in config.get("baseline_cases", [])],
+            hidden_tests=hidden,
+        )
+        with tempfile.TemporaryDirectory(prefix=f"aso-eval-{run_id[:8]}-") as tmp:
+            outcome = evaluate(context, Path(tmp))
+        with self._sessions() as session:
+            session.add(
+                EvaluationResult(
+                    run_id=run_id,
+                    signal=outcome.signal,
+                    score=outcome.score,
+                    results=outcome.results,
+                )
+            )
+            session.commit()
+        return {"signal": outcome.signal, "score": outcome.score}
 
     def _store_patch(self, run_id: str, patch: str) -> None:
         """Atomic artifact write (tmp+rename) with checksum in DB."""

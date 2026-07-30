@@ -11,6 +11,13 @@ from app.sandboxes.exec import CommandResult
 
 Outcome = str  # passed | failed | skipped | xfail | error
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _clean(text: str) -> str:
+    """Strip ANSI color codes — test runners colorize even captured output."""
+    return _ANSI.sub("", text)
+
 
 @dataclass
 class TestReport:
@@ -49,7 +56,7 @@ _PYTEST_OUTCOMES = {
 
 def parse_pytest(result: CommandResult) -> TestReport:
     """Parse `pytest -v` output into per-case results."""
-    out = result.stdout + "\n" + result.stderr
+    out = _clean(result.stdout + "\n" + result.stderr)
     if "error" in out.lower() and ("collected 0 items" in out or "errors during collection" in out):
         return TestReport(parse_ok=False, collection_error=True)
     cases = [
@@ -66,7 +73,7 @@ _VITEST_MARKS = {"✓": "passed", "✗": "failed", "×": "failed", "✘": "faile
 
 def parse_vitest(result: CommandResult) -> TestReport:
     """Parse vitest/jest verbose reporter output into per-case results."""
-    out = result.stdout + "\n" + result.stderr
+    out = _clean(result.stdout + "\n" + result.stderr)
     cases = [
         (m.group("id").strip(), _VITEST_MARKS[m.group("mark")])
         for m in _VITEST_LINE.finditer(out)

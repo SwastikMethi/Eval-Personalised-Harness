@@ -10,12 +10,15 @@ from app.models.core import (
     RunEvent,
     RunState,
 )
+from app.models.evaluation import EvaluationResult, HiddenTestCandidate
 from app.models.telemetry import ModelRequestMetric, ModelSnapshot
 
 __all__ = [
     "Artifact",
     "Base",
     "BaselineResult",
+    "EvaluationResult",
+    "HiddenTestCandidate",
     "ModelRequestMetric",
     "ModelSnapshot",
     "RepositoryAnalysis",
