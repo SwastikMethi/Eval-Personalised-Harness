@@ -196,7 +196,7 @@ export default function ExperimentDetail() {
         </>
       )}
       {results.data?.caveats?.map((c) => (
-        <Typography key={c} variant="caption" display="block" color="text.secondary">
+        <Typography key={c} variant="caption" sx={{ display: 'block' }} color="text.secondary">
           ⚠ {c}
         </Typography>
       ))}
