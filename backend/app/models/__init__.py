@@ -10,11 +10,14 @@ from app.models.core import (
     RunEvent,
     RunState,
 )
+from app.models.telemetry import ModelRequestMetric, ModelSnapshot
 
 __all__ = [
     "Artifact",
     "Base",
     "BaselineResult",
+    "ModelRequestMetric",
+    "ModelSnapshot",
     "RepositoryAnalysis",
     "RepositoryCommand",
     "BenchmarkRun",
