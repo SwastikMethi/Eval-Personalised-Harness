@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 
-from app.api import proxy, routes
+from app.api import proxy, repos_analysis, routes
 from app.core.logging import setup_logging
 from app.db.engine import SessionLocal, engine
 from app.harnesses.base import register
@@ -32,6 +32,7 @@ def create_app(start_worker: bool = True) -> FastAPI:
 
     app = FastAPI(title="Agent Stack Optimizer", lifespan=lifespan)
     app.include_router(routes.router, prefix="/api/v1")
+    app.include_router(repos_analysis.router, prefix="/api/v1")
     app.include_router(proxy.router, prefix="/proxy")
     return app
 

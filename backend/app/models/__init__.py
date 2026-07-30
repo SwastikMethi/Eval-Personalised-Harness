@@ -1,3 +1,4 @@
+from app.models.analysis import BaselineResult, RepositoryAnalysis, RepositoryCommand
 from app.models.base import Base
 from app.models.core import (
     Artifact,
@@ -13,6 +14,9 @@ from app.models.core import (
 __all__ = [
     "Artifact",
     "Base",
+    "BaselineResult",
+    "RepositoryAnalysis",
+    "RepositoryCommand",
     "BenchmarkRun",
     "BenchmarkTask",
     "Experiment",
