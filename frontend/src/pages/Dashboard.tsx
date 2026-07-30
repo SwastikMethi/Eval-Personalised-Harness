@@ -64,7 +64,8 @@ export default function Dashboard() {
                 {experiments.data?.length ? (
                   experiments.data.map((e) => (
                     <Typography key={e.id} variant="body2">
-                      {e.name} <Chip label={e.status} size="small" />
+                      <a href={`/experiments/${e.id}`}>{e.name}</a>{' '}
+                      <Chip label={e.status} size="small" />
                     </Typography>
                   ))
                 ) : (
