@@ -4,13 +4,14 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 
-from app.api import providers_api, proxy, repos_analysis, routes
+from app.api import providers_api, proxy, repos_analysis, routes, run_control
 from app.core.logging import setup_logging
 from app.db.engine import SessionLocal, engine
 from app.harnesses.base import register
 from app.harnesses.fake import FakeHarness
 from app.models import Base
 from app.orchestration.queue import QueueWorker
+from app.orchestration.recovery import reconcile
 
 
 def create_app(start_worker: bool = True) -> FastAPI:
@@ -21,11 +22,26 @@ def create_app(start_worker: bool = True) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         worker: QueueWorker | None = None
         if start_worker:
+            # Crash reconciliation before scheduling anything (eng review 2A).
+            reconcile(SessionLocal)
             # In-process ASGI transport: the FakeHarness proxy call exercises the
             # real HTTP protocol without requiring the socket to be up first.
             register(FakeHarness(transport=httpx.ASGITransport(app=app)))
-            worker = QueueWorker(SessionLocal, proxy_base_url="http://aso.local/proxy")
+            sandboxes = None
+            from app.sandboxes.manager import SandboxManager, docker_available
+
+            if docker_available():
+                sandboxes = SandboxManager()
+                from app.harnesses.mini_swe_agent import MiniSweAgentHarness
+
+                register(MiniSweAgentHarness(sandboxes))
+            worker = QueueWorker(
+                SessionLocal,
+                proxy_base_url="http://aso.local/proxy",
+                sandbox_manager=sandboxes,
+            )
             worker.start()
+            app.state.worker = worker
         yield
         if worker:
             await worker.stop()
@@ -34,6 +50,7 @@ def create_app(start_worker: bool = True) -> FastAPI:
     app.include_router(routes.router, prefix="/api/v1")
     app.include_router(repos_analysis.router, prefix="/api/v1")
     app.include_router(providers_api.router, prefix="/api/v1")
+    app.include_router(run_control.router, prefix="/api/v1")
     app.include_router(proxy.router, prefix="/proxy")
     return app
 
