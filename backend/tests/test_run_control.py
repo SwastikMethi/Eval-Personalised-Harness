@@ -82,14 +82,23 @@ async def test_retry_failed_run(client: httpx.AsyncClient) -> None:
     status = (await client.get(f"/api/v1/experiments/{exp_id}")).json()
     assert status["runs"]["by_state"].get("COMPLETED") == 1
 
-    # A COMPLETED run is NOT retryable
+    # A COMPLETED run is NOT retryable. Scope to THIS experiment's runs — the
+    # test database is shared across the session, so a global query picks up
+    # other tests' runs and asserts against whatever state they happen to be in.
     from sqlalchemy import select
 
     from app.db.engine import SessionLocal
-    from app.models import BenchmarkRun
+    from app.models import BenchmarkRun, ExperimentCombination
 
     with SessionLocal() as session:
-        run_id = session.scalars(select(BenchmarkRun.id)).all()[-1]
+        combo_ids = session.scalars(
+            select(ExperimentCombination.id).where(
+                ExperimentCombination.experiment_id == exp_id
+            )
+        ).all()
+        run_id = session.scalars(
+            select(BenchmarkRun.id).where(BenchmarkRun.combination_id.in_(combo_ids))
+        ).one()
     resp = await client.post(f"/api/v1/runs/{run_id}/retry")
     assert resp.status_code == 409
 

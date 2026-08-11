@@ -6,7 +6,9 @@ updated: 2026-08-11
 
 # Known Defects
 
-Seven defects found by reading code on 2026-08-11. **Each one blocks a real benchmark run.** Index: [[00 Index]].
+Defects found by reading code on 2026-08-11. **Each one blocks a real benchmark run.** Index: [[00 Index]].
+
+**Status: 2 of 8 fixed** (#7, #8 — Phase 1). Remaining: #1–#6.
 
 Line references are to the state at branch `worktree-aso-full-build` creation; re-grep before trusting them.
 
@@ -80,15 +82,27 @@ The proxy maps 429 correctly, but `queue.py:175-177` catches *every* exception i
 
 ---
 
-## 7. Broken developer targets 🟠
+## 7. Broken developer targets ✅ FIXED (Phase 1, 2026-08-11)
+
+Was:
 
 | Target | Failure |
 |---|---|
-| `make migrate` | `No 'script_location' key found` — `alembic` is a declared dependency but there is no `alembic/` or `alembic.ini` |
-| `make seed` | `No module named app.seed` — only `app/demo.py` exists |
-| `make test-frontend` | **False green.** `npm test --if-present` with no test script, no vitest, zero test files → exits 0 while testing nothing |
+| `make migrate` | `No 'script_location' key found` — `alembic` declared as a dependency but no `alembic/` or `alembic.ini` |
+| `make seed` | `No module named app.seed` — only `app/demo.py` existed |
+| `make test-frontend` | **False green.** `npm test --if-present` with no test script, no vitest, zero test files → exited 0 while testing nothing |
 
-**Fixed in:** Phase 1.
+Now: Alembic scaffolded with `env.py` reading `settings.database_url` and reusing `make_engine()`; initial migration covers all 14 tables; `create_all` removed from `main.py` in favour of `ensure_schema()` so **migrations are the single source of truth**. `app/seed.py` added (idempotent). Frontend has vitest + Testing Library + MSW with 7 real tests.
+
+**Guard against regression:** `tests/test_migrations.py::test_no_migration_drift` fails if a model changes without a matching migration.
+
+---
+
+## 8. `test_retry_failed_run` was order-dependent ✅ FIXED (Phase 1, 2026-08-11)
+
+Found while verifying Phase 1. `tests/test_run_control.py` selected `BenchmarkRun.id` across the **entire shared test database** with no experiment scoping and no `ORDER BY`, then assumed `[-1]` was its own run. Passed in isolation, failed intermittently in the full suite when another test's run happened to sort last.
+
+Now scoped to the test's own experiment via `ExperimentCombination`, matching the pattern `test_cancel_pending_run` already used. Verified stable across three consecutive full-suite runs.
 
 ---
 

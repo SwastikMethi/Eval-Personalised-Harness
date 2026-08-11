@@ -35,6 +35,25 @@ def make_engine(database_url: str | None = None) -> Engine:
 engine = make_engine()
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
+_BACKEND_ROOT = Path(__file__).resolve().parents[2]
+
+
+def ensure_schema() -> None:
+    """Bring the database up to head.
+
+    Migrations are the single source of truth for schema — there is no
+    `create_all` anywhere. This is a local single-user app, so upgrading on
+    startup keeps `make dev`, `make demo`, and the test suite working without
+    a separate manual step; `make migrate` does the same thing explicitly.
+    """
+    from alembic.config import Config
+
+    from alembic import command
+
+    cfg = Config(str(_BACKEND_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(_BACKEND_ROOT / "alembic"))
+    command.upgrade(cfg, "head")
+
 
 def get_session() -> Iterator[Session]:
     with SessionLocal() as session:

@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     openrouter_http_referer: str = "http://localhost:3000"
     openrouter_app_name: str = "Agent Stack Optimizer"
 
+    backend_port: int = 8005
     data_dir: Path = Path("../data")
     database_url: str = "sqlite:///../data/aso.db"
     queue_concurrency: int = 1

@@ -6,7 +6,7 @@ Local, single-user platform benchmarking harness × model combinations against t
 
 ```mermaid
 flowchart LR
-    UI[React dashboard :3000] --> API[FastAPI :8000 native host process]
+    UI[React dashboard :3000] --> API[FastAPI :8005 native host process]
     API --> DB[(SQLite WAL)]
     API --> Q[asyncio queue worker\nsingle scheduler, semaphore concurrency]
     Q --> SM[Sandbox manager]

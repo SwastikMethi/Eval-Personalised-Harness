@@ -14,17 +14,16 @@ from app.api import (
     tasks_api,
 )
 from app.core.logging import setup_logging
-from app.db.engine import SessionLocal, engine
+from app.db.engine import SessionLocal, ensure_schema
 from app.harnesses.base import register
 from app.harnesses.fake import FakeHarness
-from app.models import Base
 from app.orchestration.queue import QueueWorker
 from app.orchestration.recovery import reconcile
 
 
 def create_app(start_worker: bool = True) -> FastAPI:
     setup_logging()
-    Base.metadata.create_all(engine)
+    ensure_schema()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

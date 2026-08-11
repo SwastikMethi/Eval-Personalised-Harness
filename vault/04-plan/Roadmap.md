@@ -12,8 +12,8 @@ Phases 0–11 plus two milestones. Index: [[00 Index]]. Full plan: `.claude/plan
 
 | Phase | What | Status |
 |---|---|---|
-| 0 | Knowledge base — this vault + `CLAUDE.md` | 🔄 |
-| 1 | Repair foundations — Alembic, seed, frontend test infra | ⬜ |
+| 0 | Knowledge base — this vault + `CLAUDE.md` | ✅ |
+| 1 | Repair foundations — Alembic, seed, frontend test infra | ✅ |
 | 2 | **Wire the golden path** — snapshot, commands, baseline cases | ⬜ |
 | 3 | **Proxy hardening** — rate limits, tool calls, cost | ⬜ |
 | 4 | smolagents harness | ⬜ |

@@ -10,7 +10,7 @@ dev:
 	$(MAKE) -j2 backend frontend
 
 backend:
-	cd backend && uv run uvicorn app.main:app --reload --port 8000
+	cd backend && uv run uvicorn app.main:app --reload --port 8005
 
 frontend:
 	cd frontend && npm run dev

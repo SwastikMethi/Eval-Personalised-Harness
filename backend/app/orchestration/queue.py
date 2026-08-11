@@ -42,7 +42,9 @@ from app.models.core import VALID_TRANSITIONS, RunState
 log = logging.getLogger(__name__)
 
 SANDBOXED_HARNESSES = {"mini-swe-agent"}
-DOCKER_PROXY_BASE = "http://host.docker.internal:8000/proxy"
+# Sandboxed harnesses reach the proxy through the host gateway on the port
+# uvicorn actually listens on (Makefile `backend` target and settings agree).
+DOCKER_PROXY_BASE = f"http://host.docker.internal:{settings.backend_port}/proxy"
 
 
 def transition(run: BenchmarkRun, new_state: RunState) -> None:

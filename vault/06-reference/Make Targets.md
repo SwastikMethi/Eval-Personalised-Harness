@@ -14,27 +14,32 @@ Verified 2026-08-11. Index: [[00 Index]].
 | `make dev` | backend :8005 + frontend :3000 (parallel) | ✅ |
 | `make backend` | uvicorn `--reload --port 8005` | ✅ |
 | `make frontend` | `npm run dev` | ✅ |
-| `make test` | backend + frontend tests | ⚠️ backend only |
-| `make test-backend` | `pytest` — **77 pass in ~9s** | ✅ |
-| `make test-frontend` | `npm test --if-present` | ❌ **false green** |
+| `make test` | backend + frontend tests | ✅ |
+| `make test-backend` | `pytest` — **79 pass in ~10s** | ✅ |
+| `make test-frontend` | `vitest --run` — **7 pass in ~3.5s** | ✅ |
 | `make lint` | ruff + oxlint | ✅ |
-| `make typecheck` | mypy + `tsc --noEmit` | ✅ |
-| `make migrate` | `alembic upgrade head` | ❌ **fails** |
-| `make seed` | `python -m app.seed` | ❌ **fails** |
+| `make typecheck` | mypy (49 files) + `tsc --noEmit` | ✅ |
+| `make migrate` | `alembic upgrade head` | ✅ |
+| `make seed` | `python -m app.seed` — idempotent | ✅ |
 | `make demo` | full fake experiment, zero API cost | ✅ |
 | `make clean-sandboxes` | remove orphaned containers | ✅ |
 
-## The three broken ones
+All green as of Phase 1 (2026-08-11). Previously `migrate` and `seed` crashed and `test-frontend` was a false green — see [[Known Defects]] #7.
 
+## Migrations
+
+Schema comes **only** from Alembic; there is no `create_all`. `app/db/engine.py::ensure_schema()` runs `upgrade head` at app startup, so `make dev`, `make demo`, and the test suite all work without a manual step.
+
+```sh
+cd backend
+uv run alembic revision --autogenerate -m "what changed"   # after editing models
+uv run alembic upgrade head
+uv run alembic current
 ```
-make migrate → FAILED: No 'script_location' key found in configuration.
-make seed    → No module named app.seed
-make test-frontend → exits 0 having run nothing
-```
 
-`alembic` is a declared dependency in `pyproject.toml` but there is no `alembic/` directory or `alembic.ini`. `app/seed.py` does not exist (only `app/demo.py`). The frontend has no `test` script, no vitest, and zero test files — `--if-present` silently succeeds.
+`tests/test_migrations.py::test_no_migration_drift` fails if models and migrations diverge.
 
-All three fixed in [[Roadmap]] Phase 1. Tracked as [[Known Defects]] #7.
+> **Existing databases:** a `data/aso.db` created before Alembic was introduced already has the tables but no `alembic_version`, so `upgrade head` will fail on "table already exists". Stamp it once: `uv run alembic stamp head`.
 
 ## Prerequisites
 
