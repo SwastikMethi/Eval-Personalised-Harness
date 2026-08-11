@@ -8,7 +8,7 @@ updated: 2026-08-11
 
 Source: `generationDoc.md` §30. Index: [[00 Index]].
 
-**Live tally: 20 pass · 4 partial · 1 fail.** Update this note as phases land — it is the single scoreboard for "is the MVP done".
+**Live tally: 21 pass · 3 partial · 1 fail.** Update this note as phases land — it is the single scoreboard for "is the MVP done".
 
 > Baseline at the start of this work was **17 pass · 4 partial · 4 fail**. (An earlier draft of this note said 15/5/5; that was a miscount of the table below.) Phase 2 moved #10 ❌→✅ and #11 ⚠️→✅; Phase 3 moved #24 ❌→✅.
 
@@ -33,7 +33,7 @@ Source: `generationDoc.md` §30. Index: [[00 Index]].
 | 17 | Existing tests run after the agent completes | ✅ | fresh-snapshot evaluation |
 | 18 | Eligible hidden tests run after completion | ✅ | conservative extraction + approval |
 | 19 | Records tokens, time, commands, patch stats, tests, failures | ⚠️ | Harness/sandbox metrics collected but never persisted — no `HarnessMetric`/`SandboxMetric` tables |
-| 20 | View live progress | ⚠️ | Polling only; no SSE/WebSocket (§5, §19) |
+| 20 | View live progress | ✅ | Phase 8 — SSE stream replays persisted events, with a polling fallback |
 | 21 | Compare combinations | ✅ | comparison table + aggregation |
 | 22 | Best quality/reliability/efficiency/balanced recommendations | ✅ | 4 cards, Pareto frontiers |
 | 23 | Weak evaluation signal clearly identified | ✅ | `INSUFFICIENT_EVALUATION_SIGNAL` |

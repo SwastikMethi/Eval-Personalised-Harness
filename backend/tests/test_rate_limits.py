@@ -156,6 +156,19 @@ async def test_cost_accrues_so_the_spend_ceiling_can_fire(restore_provider: None
     proxy.revoke_run_token("cost-run")
 
 
+async def test_a_fake_run_stays_on_the_fake_provider(restore_provider: None) -> None:
+    """With a real key configured the proxy used to send EVERYTHING upstream,
+    so the zero-cost fake path broke the moment a key existed."""
+    proxy.set_provider(ThrottlingProvider())  # stands in for "the real provider"
+    token = proxy.issue_run_token("fake-run", MODEL, max_requests=3, provider="fake")
+    body = proxy.ChatRequest(model=MODEL, messages=[{"role": "user", "content": "hi"}])
+
+    response = await proxy.chat_completions(body, authorization=f"Bearer {token}")
+    assert "FAKE_COMPLETION" in response["choices"][0]["message"]["content"]
+    assert proxy.run_usage("fake-run")["rate_limited"] is False
+    proxy.revoke_run_token("fake-run")
+
+
 async def test_tool_definitions_reach_provider_and_tool_calls_come_back(
     restore_provider: None,
 ) -> None:

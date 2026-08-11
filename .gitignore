@@ -17,3 +17,4 @@ frontend/dist/
 # Obsidian: keep shared config, drop machine-specific workspace/cache
 vault/.obsidian/workspace*.json
 vault/.obsidian/cache
+.gstack/

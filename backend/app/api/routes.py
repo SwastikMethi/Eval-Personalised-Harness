@@ -127,6 +127,52 @@ def derive_config(session: Session, repository_id: str) -> dict[str, Any]:
     return derived
 
 
+@router.get("/harnesses")
+def list_available_harnesses() -> list[dict[str, Any]]:
+    """Harnesses registered in THIS process — the UI must not hardcode them.
+
+    `sandboxed` matters to the user: those need Docker and get a container plus
+    a run-scoped proxy token; the fake runs in-process for zero-cost demos.
+    """
+    from app.harnesses.base import list_harnesses
+    from app.orchestration.queue import SANDBOXED_HARNESSES
+
+    return [
+        {"name": name, "sandboxed": name in SANDBOXED_HARNESSES}
+        for name in list_harnesses()
+    ]
+
+
+class PreviewIn(BaseModel):
+    task_ids: list[str]
+    harnesses: list[str]
+    model_ids: list[str]
+    repetitions: int = 3
+
+
+@router.post("/experiments/preview")
+def preview_matrix(body: PreviewIn) -> dict[str, Any]:
+    """Expanded run count before committing (spec §13: show expected runs).
+
+    Also reports the model-request ceiling, because on a free tier the
+    binding constraint is requests per day, not wall-clock.
+    """
+    combos = len(body.harnesses) * len(body.model_ids)
+    runs = combos * len(body.task_ids) * body.repetitions
+    return {
+        "harnesses": len(body.harnesses),
+        "models": len(body.model_ids),
+        "tasks": len(body.task_ids),
+        "repetitions": body.repetitions,
+        "combinations": combos,
+        "runs": runs,
+        "expression": (
+            f"{len(body.harnesses)} harnesses × {len(body.model_ids)} models × "
+            f"{len(body.task_ids)} tasks × {body.repetitions} reps = {runs} runs"
+        ),
+    }
+
+
 @router.post("/experiments")
 def create_experiment(
     body: ExperimentIn, session: Session = Depends(get_session)

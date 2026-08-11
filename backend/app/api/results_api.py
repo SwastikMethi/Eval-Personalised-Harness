@@ -43,7 +43,15 @@ def _samples(session: Session, experiment_id: str) -> list[RunSample]:
             if run.started_at and run.completed_at:
                 duration = (run.completed_at - run.started_at).total_seconds()
             result = run.result or {}
-            tokens = (result.get("input_tokens") or 0) + (result.get("output_tokens") or 0)
+            # Prefer the PROXY's usage: it is recorded identically for every
+            # harness. Harness self-reporting is not comparable — smolagents
+            # reports usage and mini-SWE-agent legitimately does not, so using
+            # it would compare a harness that counts against one that doesn't,
+            # in a product whose whole purpose is comparing harnesses.
+            usage = result.get("usage") or {}
+            tokens = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
+            if not tokens:
+                tokens = (result.get("input_tokens") or 0) + (result.get("output_tokens") or 0)
             samples.append(
                 RunSample(
                     combination_id=combo.id,
@@ -99,5 +107,8 @@ def experiment_results(
         "caveats": [
             "efficiency scores are cohort-relative within each task",
             "results from fewer than 3 completed repetitions are statistically weak",
+            "resource efficiency currently mirrors execution efficiency — container "
+            "CPU/memory is collected but not yet persisted, so its 5% weight adds "
+            "no independent signal",
         ],
     }

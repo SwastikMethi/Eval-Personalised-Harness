@@ -116,4 +116,25 @@ Keep entries short: **what changed · why · what it unblocks · what to verify.
 
 ---
 
+## 2026-08-11 — Phases 8 & 9: the UI is drivable
+
+**What.** The whole flow is now usable from the browser: register a repo → analyze → edit commands → baseline → add tasks (described or commit replay, with hidden-test approval) → pick harnesses × models → watch live → read the comparison → drill into a run.
+
+**Backend (Phase 8).** New `app/api/live.py`: SSE `GET /experiments/{id}/events` plus `/progress`, `/runs/{id}/detail`, `/runs/{id}/patch`. Events are replayed from the persisted `RunEvent` table rather than an in-memory bus, so a browser that connects late or refreshes still sees the whole run. Also `GET /harnesses` (the UI must not hardcode them), `POST /experiments/preview` (expanded run count), and `POST /experiments/{id}/cancel`.
+
+**Frontend (Phase 9).** Design direction: *laboratory instrument* — near-black canvas, hairline rules, every number in mono, colour strictly semantic (cyan = live, green = pass, red = fail, amber = throttled). Instrument Serif / Archivo / IBM Plex Mono, deliberately not Inter or Roboto. MUI is kept (spec §5 mandates it) but themed hard. Five screens: overview, new-run wizard, live experiment, comparison, run detail.
+
+**Three real bugs the UI exposed** — none visible from the test suite:
+1. **Token efficiency was not comparable across harnesses.** Scoring read harness self-reported usage, which smolagents populates and mini-SWE-agent correctly leaves null. Now reads the proxy's usage, recorded identically for every harness. In a product built to compare harnesses this was the worst possible place for an asymmetry.
+2. **Experiments never left "running".** Status was set at creation and never updated, so the dashboard showed finished work as in-flight forever. `_settle_experiment()` now marks completion when every run is terminal.
+3. **The proxy sent everything upstream.** With a key configured, a `fake` combination was routed to OpenRouter and rejected — the zero-cost path broke the moment a key existed. The proxy now routes per-run by the combination's own provider.
+
+**Disclosed rather than hidden.** `resource_efficiency` is still a copy of `execution_efficiency` (container CPU/memory is collected but never persisted), so its 5% weight adds no independent signal. Rather than let a wrong number render quietly, the results payload now carries that as a caveat and the UI prints it under "read this before trusting the numbers". Real fix needs `SandboxMetric` persistence — [[Roadmap]] Phase 7.
+
+**Verified in a browser**, not just compiled: dashboard, wizard, live view (3/3 progress, real proxy token counts, SSE activity feed replaying `preparing → running → evaluating → completed`), and comparison (4 cards, both Pareto charts, stats table, caveats). No console errors. Suite 109 backend + 17 frontend; lint, typecheck, demo green.
+
+**Next.** Phase 5 preflight is still the highest-value remaining work — it would flag a harness × model mismatch before spending quota. Then Phase 7 to make resource efficiency real.
+
+---
+
 <!-- New entries above this line -->

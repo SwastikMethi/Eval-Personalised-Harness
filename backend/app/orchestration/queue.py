@@ -39,7 +39,7 @@ from app.models import (
     Repository,
     RunEvent,
 )
-from app.models.core import VALID_TRANSITIONS, RunState
+from app.models.core import TERMINAL_STATES, VALID_TRANSITIONS, RunState
 from app.repositories import service
 
 log = logging.getLogger(__name__)
@@ -222,6 +222,34 @@ class QueueWorker:
                 log.exception("run failed", extra={"run_id": run_id, "event_type": "run_failed"})
                 self._fail(run_id, ErrorCategory.HARNESS, str(exc))
 
+    def _settle_experiment(self, session: Session, run_id: str) -> None:
+        """Mark an experiment completed once every one of its runs is terminal.
+
+        Status was set to "running" at creation and never updated, so finished
+        experiments showed as running forever in the UI.
+        """
+        run = session.get(BenchmarkRun, run_id)
+        if run is None:
+            return
+        combo = session.get(ExperimentCombination, run.combination_id)
+        if combo is None:
+            return
+        experiment = session.get(Experiment, combo.experiment_id)
+        if experiment is None or experiment.status in ("cancelled", "paused"):
+            return
+        sibling_combos = session.scalars(
+            select(ExperimentCombination.id).where(
+                ExperimentCombination.experiment_id == combo.experiment_id
+            )
+        ).all()
+        states = session.scalars(
+            select(BenchmarkRun.state).where(
+                BenchmarkRun.combination_id.in_(list(sibling_combos))
+            )
+        ).all()
+        if states and all(RunState(s) in TERMINAL_STATES for s in states):
+            experiment.status = "completed"
+
     def _fail(self, run_id: str, category: ErrorCategory, message: str) -> None:
         with self._sessions() as session:
             run = session.get(BenchmarkRun, run_id)
@@ -231,6 +259,7 @@ class QueueWorker:
             run.error_category = category
             run.error_message = message[:2000]
             run.completed_at = datetime.now(UTC)
+            self._settle_experiment(session, run_id)
             session.commit()
 
     async def _execute(self, run_id: str) -> None:
@@ -270,6 +299,9 @@ class QueueWorker:
                 # spec §14 wants cost recorded even when it is zero.
                 input_price=in_price,
                 output_price=out_price,
+                # Route by the combination's own provider so a `fake` cell stays
+                # on the fake provider even when a real key is configured.
+                provider=provider,
             )
             proxy_base = self._proxy_base_url
             if sandboxed:
@@ -361,6 +393,7 @@ class QueueWorker:
                     "harness_meta": result.raw_metadata,
                 }
                 self._event(session, run_id, result.status, {"patch_produced": patch_produced})
+                self._settle_experiment(session, run_id)
                 session.commit()
         finally:
             revoke_run_token(run_id)

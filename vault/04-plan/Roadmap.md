@@ -21,8 +21,8 @@ Phases 0–11 plus two milestones. Index: [[00 Index]]. Full plan: `.claude/plan
 | 5 | Preflight and compatibility (§21) | ⬜ |
 | 6 | Evaluator ABC refactor (§15) | ⬜ |
 | 7 | Complete data model (§18) | ⬜ |
-| 8 | SSE + remaining API (§19) | ⬜ |
-| 9 | Five missing screens (§20) | ⬜ |
+| 8 | SSE + remaining API (§19) | ✅ |
+| 9 | Five missing screens (§20) | ✅ |
 | ▶ | **Milestone B — scaled matrix** | ⬜ |
 | 10 | OpenHands harness | ⬜ |
 | 11 | Remaining spec surface | ⬜ |

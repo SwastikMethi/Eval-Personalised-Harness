@@ -5,6 +5,7 @@ import httpx
 from fastapi import FastAPI
 
 from app.api import (
+    live,
     providers_api,
     proxy,
     repos_analysis,
@@ -90,6 +91,7 @@ def create_app(start_worker: bool = True) -> FastAPI:
     app.include_router(run_control.router, prefix="/api/v1")
     app.include_router(tasks_api.router, prefix="/api/v1")
     app.include_router(results_api.router, prefix="/api/v1")
+    app.include_router(live.router, prefix="/api/v1")
     app.include_router(proxy.router, prefix="/proxy")
     return app
 

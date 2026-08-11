@@ -45,16 +45,28 @@ class RunToken:
     input_price: float = 0.0
     output_price: float = 0.0
     rate_limited: bool = False
+    # Which provider serves THIS run. A run declares its provider in its
+    # combination, so a fake combination stays on the fake provider even when a
+    # real OpenRouter key is configured — otherwise the zero-cost path becomes
+    # unusable the moment a key exists.
+    provider: str = "openrouter"
     extra: dict[str, Any] = field(default_factory=dict)
 
 
 _active_tokens: dict[str, RunToken] = {}
 _provider: ModelProvider = FakeProvider()
+_named_providers: dict[str, ModelProvider] = {"fake": FakeProvider()}
 
 
 def set_provider(provider: ModelProvider) -> None:
+    """Set the default provider, and register it under its own name."""
     global _provider
     _provider = provider
+    _named_providers[provider.name] = provider
+
+
+def provider_for(name: str) -> ModelProvider:
+    return _named_providers.get(name, _provider)
 
 
 def issue_run_token(
@@ -66,6 +78,7 @@ def issue_run_token(
     max_cost_usd: float | None = None,
     input_price: float = 0.0,
     output_price: float = 0.0,
+    provider: str = "openrouter",
 ) -> str:
     token = secrets.token_urlsafe(24)
     _active_tokens[run_id] = RunToken(
@@ -79,6 +92,7 @@ def issue_run_token(
         max_cost_usd=max_cost_usd,
         input_price=input_price,
         output_price=output_price,
+        provider=provider,
     )
     return token
 
@@ -171,7 +185,7 @@ async def chat_completions(
     entry = _authorize(authorization, body.model)
     start = time.monotonic()
     try:
-        result = await _provider.complete(
+        result = await provider_for(entry.provider).complete(
             body.model,
             body.messages,
             temperature=body.temperature,

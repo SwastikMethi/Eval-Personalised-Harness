@@ -13,10 +13,111 @@ export interface Repository {
   path_or_url: string
 }
 
-async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`)
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-  return res.json() as Promise<T>
+export interface Harness {
+  name: string
+  sandboxed: boolean
+}
+
+export interface ModelInfo {
+  provider: string
+  model_id: string
+  display_name: string
+  context_length: number | null
+  supports_tools: boolean
+  is_free: boolean
+}
+
+export interface Analysis {
+  languages: string[]
+  package_managers: string[]
+  test_locations: string[]
+  supported: boolean
+  size_bytes: number
+  commands: Record<string, string | null>
+  default_branch?: string | null
+  current_commit?: string | null
+}
+
+export interface Commit {
+  sha: string
+  subject: string
+  author: string
+  date: string
+  parent: string
+}
+
+export interface BaselineOutcome {
+  baseline_id: string
+  benchmarkable: boolean
+  warn: boolean
+  steps: Record<string, { exit_code: number }>
+}
+
+export interface HiddenTest {
+  id: string
+  relpath: string
+  change_type: string
+  confidence: string
+  reject_reason: string | null
+  approved: boolean | null
+}
+
+export interface MatrixPreview {
+  combinations: number
+  runs: number
+  expression: string
+}
+
+export interface RunRow {
+  run_id: string
+  harness: string
+  model_id: string
+  repetition: number
+  state: string
+  error_category: string | null
+  elapsed_s: number | null
+  model_requests: number | null
+  input_tokens: number | null
+  output_tokens: number | null
+  rate_limited: boolean
+  budget_exhausted: boolean
+  score: number | null
+  patch_produced: boolean | null
+}
+
+export interface Progress {
+  experiment_id: string
+  total: number
+  done: number
+  by_state: Record<string, number>
+  finished: boolean
+  runs: RunRow[]
+}
+
+export interface RunDetail {
+  id: string
+  state: string
+  harness: string | null
+  model_id: string | null
+  repetition: number
+  task: { id: string; title: string; prompt: string } | null
+  error_category: string | null
+  error_message: string | null
+  started_at: string | null
+  completed_at: string | null
+  result: Record<string, unknown>
+  usage: Record<string, number | boolean>
+  evaluation: { signal: string; score: number | null; results: Record<string, any> } | null
+  model_requests: {
+    http_status: number
+    latency_ms: number
+    input_tokens: number | null
+    output_tokens: number | null
+    routed_provider: string | null
+    error: string | null
+  }[]
+  timeline: { type: string; payload: Record<string, unknown>; at: string }[]
+  has_patch: boolean
 }
 
 export interface ComboRecommendation {
@@ -54,6 +155,7 @@ export interface CombinationStats {
   ineligible_reasons: string[]
   statistically_weak: boolean
   weighted_score: number | null
+  components?: Record<string, number>
 }
 
 export interface ExperimentResults {
@@ -70,10 +172,86 @@ export interface ExperimentStatus {
   runs: { total: number; by_state: Record<string, number> }
 }
 
+async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+  })
+  if (!res.ok) {
+    // Surface the backend's own message — "repository uses git submodules" is
+    // far more actionable than "422".
+    let detail = `${res.status} ${res.statusText}`
+    try {
+      const body = await res.json()
+      if (body?.detail) detail = typeof body.detail === 'string' ? body.detail : detail
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new Error(detail)
+  }
+  return (res.status === 204 ? null : await res.json()) as T
+}
+
+const get = <T,>(path: string) => req<T>(path)
+const post = <T,>(path: string, body?: unknown) =>
+  req<T>(path, { method: 'POST', body: JSON.stringify(body ?? {}) })
+const put = <T,>(path: string, body: unknown) =>
+  req<T>(path, { method: 'PUT', body: JSON.stringify(body) })
+
 export const api = {
   health: () => get<{ status: string }>('/health'),
   experiments: () => get<Experiment[]>('/experiments'),
   repositories: () => get<Repository[]>('/repositories'),
   experiment: (id: string) => get<ExperimentStatus>(`/experiments/${id}`),
   results: (id: string) => get<ExperimentResults>(`/experiments/${id}/results`),
+
+  harnesses: () => get<Harness[]>('/harnesses'),
+  models: (freeOnly = true) =>
+    get<ModelInfo[]>(`/providers/openrouter/models?free_only=${freeOnly}`),
+  connection: () => get<{ ok: boolean; latency_ms: number }>('/providers/openrouter/connection'),
+  snapshotModel: (modelId: string) =>
+    post<{ snapshot_id: string }>(`/providers/openrouter/models/${modelId}/snapshot`),
+
+  addRepository: (body: { name: string; source: string; path_or_url: string }) =>
+    post<{ id: string }>('/repositories', body),
+  // analyze() only confirms it ran; fetch analysis() for the detail.
+  analyze: (id: string) => post<{ analysis_id: string; supported: boolean }>(
+    `/repositories/${id}/analyze`,
+  ),
+  analysis: (id: string) => get<Analysis>(`/repositories/${id}/analysis`),
+  updateCommands: (id: string, commands: Record<string, string | null>) =>
+    put<{ ok: boolean }>(`/repositories/${id}/commands`, commands),
+  baseline: (id: string) => post<BaselineOutcome>(`/repositories/${id}/baseline`),
+  commits: (id: string) => get<Commit[]>(`/repositories/${id}/commits`),
+
+  createTask: (body: { repository_id: string; title: string; prompt: string }) =>
+    post<{ id: string }>('/tasks', body),
+  taskFromCommit: (body: { repository_id: string; sha: string }) =>
+    post<{ id: string; base_commit: string; hidden_test_candidates: number }>(
+      '/tasks/from-commit',
+      body,
+    ),
+  hiddenTests: (taskId: string) => get<HiddenTest[]>(`/tasks/${taskId}/hidden-tests`),
+  approveHiddenTest: (id: string, approved: boolean) =>
+    put<{ ok: boolean }>(`/hidden-tests/${id}`, { approved }),
+
+  preview: (body: {
+    task_ids: string[]
+    harnesses: string[]
+    model_ids: string[]
+    repetitions: number
+  }) => post<MatrixPreview>('/experiments/preview', body),
+  createExperiment: (body: unknown) => post<{ id: string; runs: number }>('/experiments', body),
+
+  progress: (id: string) => get<Progress>(`/experiments/${id}/progress`),
+  pause: (id: string) => post<{ ok: boolean }>(`/experiments/${id}/pause`),
+  resume: (id: string) => post<{ ok: boolean }>(`/experiments/${id}/resume`),
+  cancelExperiment: (id: string) => post<{ ok: boolean }>(`/experiments/${id}/cancel`),
+  cancelRun: (id: string) => post<{ ok: boolean }>(`/runs/${id}/cancel`),
+  retryRun: (id: string) => post<{ ok: boolean }>(`/runs/${id}/retry`),
+
+  runDetail: (id: string) => get<RunDetail>(`/runs/${id}/detail`),
+  runPatch: (id: string) => get<{ patch: string; checksum: string }>(`/runs/${id}/patch`),
 }
+
+export const eventsUrl = (experimentId: string) => `${BASE}/experiments/${experimentId}/events`
