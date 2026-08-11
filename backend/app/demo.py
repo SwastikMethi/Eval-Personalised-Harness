@@ -17,6 +17,14 @@ FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "python-bug-repo"
 
 async def main() -> int:
     app = create_app(start_worker=True)
+    # create_app installs OpenRouterProvider whenever a key is configured, but
+    # this demo is documented as zero API cost and uses a fake model id that a
+    # real provider rightly rejects. Force the fake back so `make demo` never
+    # spends quota — free tier grants ~50 requests a DAY (ADR-003).
+    from app.api.proxy import set_provider
+    from app.providers.fake import FakeProvider
+
+    set_provider(FakeProvider())
     transport = httpx.ASGITransport(app=app)
     async with app.router.lifespan_context(app), httpx.AsyncClient(
         transport=transport, base_url="http://aso.local"
