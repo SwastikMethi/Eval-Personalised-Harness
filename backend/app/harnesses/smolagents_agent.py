@@ -67,8 +67,13 @@ try:
         out["input_tokens"] = getattr(usage, "input_tokens", None)
         out["output_tokens"] = getattr(usage, "output_tokens", None)
 except Exception as exc:
+    import traceback
+
     out["error_type"] = type(exc).__name__
     out["error_message"] = str(exc)[:2000]
+    # smolagents wraps provider failures in a generic "Connection error",
+    # which is useless for diagnosis without the underlying frames.
+    out["traceback"] = traceback.format_exc()[-3000:]
 
 with open(os.environ["ASO_OUT"], "w") as fh:
     json.dump(out, fh)
@@ -157,7 +162,12 @@ class SmolagentsHarness(HarnessAdapter):
             commands_executed=0,  # CodeAgent executes Python, not shell commands
             error_type=error_type,
             error_message=error_message,
-            raw_metadata={"exit_code": result.exit_code, "truncated": result.truncated},
+            raw_metadata={
+                "exit_code": result.exit_code,
+                "truncated": result.truncated,
+                "traceback": report.get("traceback"),
+                "stdout_tail": result.stdout[-2000:],
+            },
         )
 
     @staticmethod
