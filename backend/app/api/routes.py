@@ -7,11 +7,13 @@ from sqlalchemy.orm import Session
 
 from app.db.engine import get_session
 from app.models import (
+    BaselineResult,
     BenchmarkRun,
     BenchmarkTask,
     Experiment,
     ExperimentCombination,
     Repository,
+    RepositoryCommand,
     RunEvent,
 )
 from app.models.core import RunState
@@ -89,17 +91,55 @@ class ExperimentIn(BaseModel):
     config: dict[str, Any] = {}
 
 
+def derive_config(session: Session, repository_id: str) -> dict[str, Any]:
+    """Config the runs actually need, taken from persisted analysis.
+
+    Without this, `queue._evaluate` falls back to a hardcoded `pytest -v` and
+    an empty baseline — so a JS repo would be graded with pytest and every
+    regression check would compare against nothing.
+    """
+    derived: dict[str, Any] = {}
+
+    commands = session.scalars(
+        select(RepositoryCommand).where(RepositoryCommand.repository_id == repository_id)
+    ).first()
+    if commands is not None:
+        named = {
+            "install": commands.install,
+            "build": commands.build,
+            "test": commands.test,
+            "lint": commands.lint,
+            "typecheck": commands.typecheck,
+        }
+        derived["commands"] = {k: v for k, v in named.items() if v}
+        if commands.test_framework:
+            derived["test_framework"] = commands.test_framework
+
+    baseline = session.scalars(
+        select(BaselineResult)
+        .where(BaselineResult.repository_id == repository_id)
+        .order_by(BaselineResult.created_at.desc())
+    ).first()
+    if baseline is not None:
+        # Pre-existing failures are never counted as agent regressions (spec §7).
+        derived["baseline_cases"] = baseline.test_cases
+
+    return derived
+
+
 @router.post("/experiments")
 def create_experiment(
     body: ExperimentIn, session: Session = Depends(get_session)
 ) -> dict[str, Any]:
     if session.get(Repository, body.repository_id) is None:
         raise HTTPException(404, "repository not found")
+    # Explicit request values win over derived ones so a caller can override.
+    config = {**derive_config(session, body.repository_id), **body.config}
     exp = Experiment(
         repository_id=body.repository_id,
         name=body.name,
         repetitions=body.repetitions,
-        config=body.config,
+        config=config,
     )
     session.add(exp)
     session.flush()

@@ -24,9 +24,9 @@ updated: 2026-08-11
 
 `git archive` at the **base** commit → extracted into a fresh directory → `git init` → one synthetic commit. No original history, no remotes, no hooks. The solution commit never enters the sandbox.
 
-Implemented: `app/repositories/service.py::create_snapshot`.
+Implemented: `app/repositories/service.py::create_snapshot`, called from `app/orchestration/queue.py::materialize_workspace` for every run whose task has a base commit. Grading rebuilds its own fresh snapshot rather than reusing the agent's workspace.
 
-> ⚠️ **Currently severed.** The queue does not call this — it copies `config["fixture_path"]` verbatim. See [[Known Defects]] #1. Until [[Roadmap]] Phase 2 lands, historical replay does not actually work.
+Fixture-driven demos fall back to a plain directory copy — they have no history to leak. A task with neither a base commit nor a fixture raises instead of silently grading the wrong tree.
 
 ### 2. Two-phase network
 

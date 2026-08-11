@@ -8,47 +8,35 @@ updated: 2026-08-11
 
 Defects found by reading code on 2026-08-11. **Each one blocks a real benchmark run.** Index: [[00 Index]].
 
-**Status: 2 of 8 fixed** (#7, #8 — Phase 1). Remaining: #1–#6.
+**Status: 5 of 8 fixed** (#1, #2, #3 — Phase 2; #7, #8 — Phase 1). Remaining: **#4, #5, #6** — all Phase 3.
 
 Line references are to the state at branch `worktree-aso-full-build` creation; re-grep before trusting them.
 
 ---
 
-## 1. The golden path is severed 🔴
+## 1. The golden path is severed ✅ FIXED (Phase 2, 2026-08-11)
 
-`service.create_snapshot()` — the [[Leakage Prevention]] `git archive`-at-base-commit builder — is called **only** from `api/repos_analysis.py:157` during baseline validation. The queue never calls it.
+Was: `service.create_snapshot()` — the [[Leakage Prevention]] `git archive`-at-base-commit builder — was called **only** from `api/repos_analysis.py` during baseline validation. The queue never called it, building every agent workspace with `shutil.copytree(config["fixture_path"])` and ignoring `task.base_commit`. Historical replay silently graded the wrong tree.
 
-`orchestration/queue.py:208` builds every agent workspace with:
+Now: `queue.py::materialize_workspace()` snapshots at the task's base commit for any task that has one, falling back to `fixture_path` only for fixture-driven demos (which have no history to leak). It raises rather than guessing when neither is available. `_evaluate` rebuilds its own fresh snapshot so grading never sees anything the agent did except the patch.
 
-```python
-fixture = config.get("fixture_path")
-if fixture:
-    shutil.copytree(fixture, workspace, dirs_exist_ok=True)
-```
-
-**Consequence:** historical replay does not actually work. A task carries `base_commit`, but the run ignores it and copies a raw directory.
-
-**Blocks:** [[Acceptance Criteria]] #10, #11. **Fixed in:** [[Roadmap]] Phase 2.
+**Guard:** `tests/test_golden_path.py` asserts the workspace has no solution file, exactly one commit, and no remotes — plus an end-to-end run proving a from-commit task now grades against a snapshot.
 
 ---
 
-## 2. Regression detection is dead on real repos 🔴
+## 2. Regression detection is dead on real repos ✅ FIXED (Phase 2, 2026-08-11)
 
-Nothing writes `baseline_cases` into experiment config — grep finds only *readers* (`queue.py:329`), no producer. `BaselineResult` rows exist but never reach a run.
+Was: nothing wrote `baseline_cases` into experiment config — only readers existed. `BaselineResult` rows never reached a run, so every regression check compared against an empty baseline.
 
-**Consequence:** every regression check compares against an empty baseline, so regressions are invisible.
-
-**Fixed in:** Phase 2.
+Now: `routes.py::derive_config()` copies the latest `BaselineResult.test_cases` into experiment config at creation time.
 
 ---
 
-## 3. Detected commands never reach runs 🟠
+## 3. Detected commands never reach runs ✅ FIXED (Phase 2, 2026-08-11)
 
-`RepositoryCommand` rows are populated by analysis, but `queue.py:327` falls back to a hardcoded `{"test": "pytest -v"}`.
+Was: `RepositoryCommand` rows were populated by analysis but the queue fell back to a hardcoded `{"test": "pytest -v"}` — a JS/TS repo would have been graded with pytest.
 
-**Consequence:** a JS/TS repo would be graded with pytest.
-
-**Fixed in:** Phase 2.
+Now: `derive_config()` supplies install/build/test/lint/typecheck and `test_framework` from the persisted row, with explicit request values still winning so a caller can override.
 
 ---
 

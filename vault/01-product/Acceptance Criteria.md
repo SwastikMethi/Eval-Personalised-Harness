@@ -8,7 +8,9 @@ updated: 2026-08-11
 
 Source: `generationDoc.md` §30. Index: [[00 Index]].
 
-**Live tally: 15 pass · 5 partial · 5 fail.** Update this note as phases land — it is the single scoreboard for "is the MVP done".
+**Live tally: 19 pass · 3 partial · 3 fail.** Update this note as phases land — it is the single scoreboard for "is the MVP done".
+
+> Baseline at the start of this work was **17 pass · 4 partial · 4 fail**. (An earlier draft of this note said 15/5/5; that was a miscount of the table below.) Phase 2 moved #10 ❌→✅ and #11 ⚠️→✅.
 
 | # | Criterion | Status | Notes |
 |---|---|---|---|
@@ -21,8 +23,8 @@ Source: `generationDoc.md` §30. Index: [[00 Index]].
 | 7 | Edit detected commands | ✅ | `PUT /repositories/{id}/commands` |
 | 8 | Run a clean baseline | ✅ | per-test-case results stored |
 | 9 | Select a historical commit as a task | ✅ | `POST /tasks/from-commit` |
-| 10 | **Agent receives only the base repository snapshot** | ❌ | Queue ignores `base_commit` — see [[Known Defects]] #1 |
-| 11 | Final historical patch not available inside the sandbox | ⚠️ | Holds for fixtures; unverified for real repos because #10 is broken |
+| 10 | Agent receives only the base repository snapshot | ✅ | Phase 2 — `materialize_workspace` snapshots at `base_commit` |
+| 11 | Final historical patch not available inside the sandbox | ✅ | Phase 2 — asserted by `test_golden_path.py` (no solution file, one commit, no remotes) |
 | 12 | **Select OpenHands, mini-SWE-agent, and smolagents** | ❌ | Only mini-SWE-agent exists — [[ADR-001 Harness Choice]] |
 | 13 | Validates harness-model compatibility | ❌ | No preflight subsystem (§21) |
 | 14 | Each run executes in a fresh Docker container | ✅ | non-root, cap-drop ALL, limits |

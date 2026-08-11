@@ -35,9 +35,11 @@ from app.models import (
     Experiment,
     ExperimentCombination,
     HiddenTestCandidate,
+    Repository,
     RunEvent,
 )
 from app.models.core import VALID_TRANSITIONS, RunState
+from app.repositories import service
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +54,39 @@ def transition(run: BenchmarkRun, new_state: RunState) -> None:
     if new_state not in VALID_TRANSITIONS[current]:
         raise ValueError(f"invalid transition {current} -> {new_state}")
     run.state = new_state
+
+
+def repo_root(repo: Repository) -> Path:
+    """On-disk root for a registered repository (clones on first use)."""
+    if repo.source == "local":
+        return service.register_local(repo.path_or_url)
+    return service.clone_github(repo.path_or_url, repo.id)
+
+
+def materialize_workspace(
+    task: BenchmarkTask, repo: Repository | None, config: dict[str, Any], dest: Path
+) -> None:
+    """Build the agent-visible tree at `dest`, which must not already exist.
+
+    For a task with a base commit this is the leakage boundary (spec §9):
+    `git archive` at the BASE commit into a fresh directory with brand-new git
+    history, so the solution commit, the original remotes, and future history
+    never enter the sandbox. Falling back to a raw directory copy is only for
+    fixture-driven demos, which have no history to leak.
+    """
+    if task.base_commit:
+        if repo is None:
+            raise RuntimeError(f"task {task.id} has a base commit but no repository")
+        service.create_snapshot(repo_root(repo), task.base_commit, dest)
+        return
+    fixture = config.get("fixture_path")
+    if fixture:
+        shutil.copytree(fixture, dest)
+        return
+    raise RuntimeError(
+        f"task {task.id} has neither a base commit nor a fixture_path — "
+        "nothing to build a workspace from"
+    )
 
 
 class QueueWorker:
@@ -199,15 +234,17 @@ class QueueWorker:
             harness_name, model_id, provider = combo.harness, combo.model_id, combo.provider
             prompt, task_id = task.prompt, task.id
             config = dict(experiment.config)
+            repo = session.get(Repository, task.repository_id)
             self._event(session, run_id, "preparing", {})
             session.commit()
 
         sandboxed = harness_name in SANDBOXED_HARNESSES and self._sandboxes is not None
-        workspace = Path(tempfile.mkdtemp(prefix=f"aso-{run_id[:8]}-"))
+        # mkdtemp gives us a parent to clean up; the workspace itself must not
+        # exist yet because create_snapshot refuses to write into a live dir.
+        tmp_root = Path(tempfile.mkdtemp(prefix=f"aso-{run_id[:8]}-"))
+        workspace = tmp_root / "workspace"
         try:
-            fixture = config.get("fixture_path")
-            if fixture:
-                shutil.copytree(fixture, workspace, dirs_exist_ok=True)
+            materialize_workspace(task, repo, config, workspace)
 
             token = issue_run_token(
                 run_id,
@@ -295,23 +332,26 @@ class QueueWorker:
             revoke_run_token(run_id)
             if sandboxed and self._sandboxes is not None:
                 await self._sandboxes.cleanup(run_id)
-            shutil.rmtree(workspace, ignore_errors=True)
+            shutil.rmtree(tmp_root, ignore_errors=True)
 
     def _evaluate(
         self, run_id: str, task_id: str, patch: str | None, config: dict[str, Any]
     ) -> dict[str, Any]:
-        """Grade the patch on a fresh snapshot (Tension 2) and persist results."""
-        import tempfile
+        """Grade the patch on a fresh snapshot (Tension 2) and persist results.
 
+        The snapshot is rebuilt here rather than reusing the agent's workspace:
+        grading must never see anything the agent did except the patch itself.
+        """
         from sqlalchemy import select as sa_select
 
         from app.evaluators.engine import EvaluationContext, evaluate
         from app.models import EvaluationResult
 
-        snapshot_source = config.get("fixture_path")
-        if not snapshot_source:
-            return {"signal": "no_evaluation_configured", "score": None}
         with self._sessions() as session:
+            task = session.get(BenchmarkTask, task_id)
+            if task is None:
+                return {"signal": "no_evaluation_configured", "score": None}
+            repo = session.get(Repository, task.repository_id)
             hidden = {
                 c.relpath: c.content
                 for c in session.scalars(
@@ -321,16 +361,24 @@ class QueueWorker:
                     )
                 )
             }
-        context = EvaluationContext(
-            patch=patch,
-            snapshot_source=Path(snapshot_source),
-            commands=dict(config.get("commands", {"test": "pytest -v"})),
-            test_framework=config.get("test_framework", "pytest"),
-            baseline_cases=[tuple(c) for c in config.get("baseline_cases", [])],
-            hidden_tests=hidden,
-        )
+
+        if not task.base_commit and not config.get("fixture_path"):
+            return {"signal": "no_evaluation_configured", "score": None}
+
         with tempfile.TemporaryDirectory(prefix=f"aso-eval-{run_id[:8]}-") as tmp:
-            outcome = evaluate(context, Path(tmp))
+            tmp_path = Path(tmp)
+            snapshot_source = tmp_path / "base"
+            materialize_workspace(task, repo, config, snapshot_source)
+            context = EvaluationContext(
+                patch=patch,
+                snapshot_source=snapshot_source,
+                commands=dict(config.get("commands") or {"test": "pytest -v"}),
+                test_framework=config.get("test_framework", "pytest"),
+                baseline_cases=[tuple(c) for c in config.get("baseline_cases", [])],
+                hidden_tests=hidden,
+            )
+            outcome = evaluate(context, tmp_path)
+
         with self._sessions() as session:
             session.add(
                 EvaluationResult(
