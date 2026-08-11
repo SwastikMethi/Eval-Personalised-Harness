@@ -39,6 +39,15 @@ curl -s https://openrouter.ai/api/v1/models \
 
 **Unsuitable:** `nemotron-3.5-content-safety` is a safety classifier with no tool support; `nemotron-nano-12b-v2-vl` is vision-focused.
 
+## Observed behaviour (2026-08-11, live runs)
+
+| Model | Finding |
+|---|---|
+| `openai/gpt-oss-20b:free` | **Heavily throttled upstream** — 4 consecutive 429s before one success. Usable, but expect retries to eat the daily quota. |
+| `cohere/north-mini-code:free` | Works well with **mini-SWE-agent** (14 steps, 14 shell commands). **Incompatible with smolagents**: returns tool-call JSON where smolagents expects `<code>` blocks → "Error in code parsing". |
+
+The second row is the product working as intended: the same model is fine under one harness and unusable under another. Preflight ([[Roadmap]] Phase 5) should surface this before an experiment spends quota.
+
 ## Not free — investigated and ruled out
 
 Kimi and GLM are both open-weight and both requested, but have **no `:free` variant**:

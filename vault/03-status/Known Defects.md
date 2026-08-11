@@ -8,7 +8,47 @@ updated: 2026-08-11
 
 Defects found by reading code on 2026-08-11. **Each one blocks a real benchmark run.** Index: [[00 Index]].
 
-**Status: all 8 fixed** (#1–#3 Phase 2 · #4–#6 Phase 3 · #7–#8 Phase 1). Kept as a record of what was wrong and what guards it now.
+**Status: all 14 fixed.** #1–#3 Phase 2 · #4–#6 Phase 3 · #7–#8 Phase 1 · #9 Phase 3 · **#10–#14 found by attempting the first real model run**. Kept as a record of what was wrong and what guards it now.
+
+> Defects #10–#14 are the important ones: each alone made a sandboxed benchmark impossible, and none was visible from the test suite, because nothing had ever executed a real run.
+
+---
+
+## 10. Sealing killed the proxy path 🔴 ✅ FIXED (2026-08-11)
+
+A container on an `internal: true` network has no default route **at all** — not to the internet and not to the host gateway. So `host.docker.internal` died along with egress, contradicting what [[Sandbox]] and `docs/architecture.md` both claimed.
+
+Measured: proxy answered `200` before `seal()`, unreachable after.
+
+**Why it stayed invisible:** `seal()` only verified that egress was dead, never that the proxy was alive. So every sandboxed run made **zero model requests and reported `COMPLETED`** — the worst possible failure mode.
+
+Now: a per-run relay container straddles both networks; `seal()` fails closed in both directions. See [[Sandbox]].
+
+---
+
+## 11. mini-swe-agent addressed containers by task_id 🔴 ✅ FIXED
+
+`prepare()` passed `request.task_id` to the sandbox manager, which keys containers by **run_id** — so every sandboxed run died with `KeyError` during PREPARING. This harness could never have started in a sandbox. Guarded by `tests/test_mini_swe_agent.py`.
+
+---
+
+## 12. mini-swe-agent demanded interactive setup 🟠 ✅ FIXED
+
+Without `MSWEA_CONFIGURED` the CLI drops into a first-run wizard asking for a model and API key, which in a non-tty container simply fails. Set alongside `MSWEA_SILENT_STARTUP`.
+
+---
+
+## 13. litellm cost lookup killed every run 🔴 ✅ FIXED
+
+mini **re-raises** when litellm cannot price a model, so the run died right after its first successful completion. litellm has no pricing for a model served through our proxy. Fixed via the documented `LITELLM_MODEL_REGISTRY_PATH` hook; zero is the true cost for the pinned free variants, and the proxy's `ModelRequestMetric` rows stay authoritative.
+
+---
+
+## 14. The real provider was never installed 🔴 ✅ FIXED
+
+`proxy.set_provider()` was never called with `OpenRouterProvider`, so the proxy kept its `FakeProvider` default forever — a "real" run got canned completions. Compounded by `env_file=".env"` resolving against the process CWD, so `make backend` (which runs from `backend/`) never loaded the repo-root `.env` and the API key never arrived.
+
+Fixing the second exposed a third: with the root `.env` loading, the **test suite** picked up the real key and started making live API calls. `conftest.py` now pins `OPENROUTER_API_KEY` empty so tests are hermetic by construction and can never spend quota.
 
 Line references are to the state at branch `worktree-aso-full-build` creation; re-grep before trusting them.
 

@@ -43,7 +43,7 @@ Crash recovery: containers are labeled `aso.run_id`; on startup a reconciliation
 ## Leakage prevention (historical replay)
 
 1. Workspace = `git archive` at the **base** commit extracted into a fresh directory, then `git init` + one synthetic commit. No original history, no remotes, no hooks. The solution commit never enters the sandbox.
-2. Two-phase network: **PREP** (bridge, egress allowed — dependency install and baseline run before any agent code executes) → **sealed** (per-run `internal: true` network; fail-closed probe verifies external egress is dead; the model proxy stays reachable via host-gateway).
+2. Two-phase network: **PREP** (bridge, egress allowed — dependency install and baseline run before any agent code executes) → **sealed** (per-run `internal: true` network). An internal network has no default route at all, including to the host gateway, so the proxy is reached via a per-run **relay container** attached to both networks. `seal()` fail-closes in both directions: external egress must be dead *and* the proxy reachable.
 3. Hidden tests are extracted from the target commit conservatively (tests importing target-only modules are rejected), require user approval, and run only after the agent stops.
 4. The container receives a short-lived per-run token, never the OpenRouter key. The proxy pins the model, enforces request/token/spend budgets, and records every request.
 

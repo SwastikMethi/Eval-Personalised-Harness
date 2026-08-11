@@ -32,11 +32,23 @@ Configurable per experiment.
 | Phase | Network | Purpose |
 |---|---|---|
 | **PREP** | default bridge, egress allowed | dependency install + baseline, *before any agent code runs* |
-| **AGENT** | per-run `internal: true` network | no default route → general egress dead |
+| **AGENT** | per-run `internal: true` network + relay | no default route → general egress dead |
 
-The proxy remains reachable because the container is created with an `extra_hosts` host-gateway mapping and the proxy URL uses `host.docker.internal` — reaching the *host* gateway does not require a routable external network.
+> **Corrected 2026-08-11.** This note previously claimed the proxy stays reachable via `host.docker.internal` and a host-gateway mapping. **That is false.** A container on an `internal: true` network has no default route *at all* — not to the internet and not to the host gateway. Measured: the proxy answered `200` before `seal()` and was unreachable after. Because `seal()` only verified that egress was dead, every sandboxed run made **zero model requests and still reported success**.
 
-**`seal()` fails closed.** After switching networks it probes external egress; if the probe succeeds, it cleans up and raises rather than proceeding. A sandbox that cannot prove it is sealed is not used.
+### The relay
+
+The agent reaches the proxy through a per-run **relay container** attached to *both* the run's internal network and the default bridge:
+
+```
+agent (internal net only)  →  aso-relay-<run>  →  host.docker.internal:8005  →  proxy
+```
+
+The agent still has exactly one reachable destination and no route to the internet. Verified after sealing: direct `host.docker.internal` **unreachable**, via relay **200 OK**, external egress **refused**.
+
+**`seal()` now fails closed in both directions.** It asserts external egress is dead *and* the proxy is reachable, raising if either check fails. Verifying only the first is what let a run look successful while doing nothing.
+
+Cleanup removes the agent, the relay, then the network — in that order, since a network with live endpoints refuses removal and would leak on every run.
 
 ## The harness runs inside
 

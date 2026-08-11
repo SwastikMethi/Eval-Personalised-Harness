@@ -31,9 +31,9 @@ Fixture-driven demos fall back to a plain directory copy — they have no histor
 ### 2. Two-phase network
 
 - **PREP** — container on the default bridge; dependency install and baseline run *before any agent code executes*
-- **AGENT** — bridge disconnected, container joined to a per-run `internal: true` network. Internal networks have no default route, so general egress is dead. The proxy stays reachable via `host.docker.internal` (host-gateway mapping).
+- **AGENT** — bridge disconnected, container joined to a per-run `internal: true` network. Internal networks have no default route, so general egress is dead — **including to the host gateway**. The proxy is reached through a per-run relay container that straddles both networks. See [[Sandbox]].
 
-`seal()` **fails closed**: it probes external egress and refuses to report sealed if the probe succeeds.
+`seal()` **fails closed in both directions**: external egress must be dead *and* the proxy reachable. Verifying only the first is how sealed runs made zero model requests and still reported success.
 
 Implemented: `app/sandboxes/manager.py::seal`. See [[Sandbox]].
 

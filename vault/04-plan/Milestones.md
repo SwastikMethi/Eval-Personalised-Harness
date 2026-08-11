@@ -36,6 +36,27 @@ Every cell reaches `COMPLETED` **or** fails with a *correctly categorized* error
 
 **This is the first real proof the product works.**
 
+### Status 2026-08-11: pipeline proven, no solve yet
+
+Live runs against real models now work end to end. What is confirmed:
+
+| Evidence | Result |
+|---|---|
+| Real model requests through the sealed sandbox | ✅ up to **20 requests/run** |
+| Real token accounting | ✅ **27,166 in / 4,222 out** on one run |
+| Agent executes real shell commands | ✅ **14 steps, 14 commands** |
+| Network isolation under load | ✅ egress refused, relay only |
+| Budget enforcement | ✅ `budget_exhausted` fires at the cap |
+| Both harnesses reach the model | ✅ mini-SWE-agent and smolagents |
+| **A passing patch** | ❌ **not yet** |
+
+Two distinct reasons no combination has solved the task yet, both informative rather than defects:
+
+1. **Budget.** mini-SWE-agent spends most of its steps exploring; at 8 requests it was still reading files, and at 20 it was still running the test suite. The task needs more budget than free tier comfortably allows.
+2. **Harness × model incompatibility.** `cohere/north-mini-code:free` returns tool-call JSON where smolagents expects `<code>` blocks → "Error in code parsing". This is exactly the signal the product exists to surface, and exactly what spec §21 preflight ([[Roadmap]] Phase 5) is for.
+
+Also learned: `openai/gpt-oss-20b:free` is heavily throttled upstream — **4 consecutive 429s before one success**.
+
 ### On empty patches
 
 The fixture bug (`median()` wrong on even-length lists) is a one-line fix, so 8 requests is fair. If models exhaust the budget without patching, that is a **legitimate benchmark result** the eligibility rules should mark — not something to paper over. §31: *do not fake metrics.*

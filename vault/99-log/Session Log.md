@@ -98,4 +98,22 @@ Keep entries short: **what changed · why · what it unblocks · what to verify.
 
 ---
 
+## 2026-08-11 — First real model runs: five more defects, all fixed
+
+**What happened.** Attempting [[Milestones]] Milestone A surfaced five defects the entire test suite could not see, because nothing had ever executed a real run. Each alone made a sandboxed benchmark impossible. All are now fixed and recorded as [[Known Defects]] #10–#14.
+
+**The big one (#10).** Sealing killed the proxy path. An `internal: true` network has no default route *at all* — including to the host gateway — so `host.docker.internal` died with egress. Both `docs/architecture.md` and [[Sandbox]] claimed otherwise; both are now corrected. Because `seal()` only checked that egress was dead, sealed runs made **zero model requests and reported COMPLETED**. Fixed with a per-run relay container straddling both networks, and `seal()` now fails closed in *both* directions.
+
+**The lesson.** Every one of these hid behind a green suite. A run that exits 0 having done nothing is indistinguishable from a good one unless something asserts it did work — so harness telemetry (stdout tail, tracebacks) is now persisted into `run.result`, and the proxy-reachability assertion is part of sealing.
+
+**What now works, measured.** Up to 20 model requests per run · 27,166 input / 4,222 output tokens · 14 agent steps executing 14 real shell commands · egress refused while the relay stays reachable · budget ceiling fires correctly · both harnesses reach live models.
+
+**What does not work yet.** No combination has produced a passing patch. Two reasons, both legitimate findings rather than bugs: mini-SWE-agent spends its budget exploring (still running tests at 20 requests), and `cohere/north-mini-code:free` emits tool-call JSON where smolagents expects `<code>` blocks. The second is precisely the harness × model incompatibility the product exists to measure, and precisely what §21 preflight ([[Roadmap]] Phase 5) should catch before an experiment runs.
+
+**Quota reality.** `openai/gpt-oss-20b:free` returned **4 consecutive 429s before one success**. Combined with ~50 requests/day and agents needing 20+, [[ADR-003 Free Tier Constraints]] is if anything understated.
+
+**Next.** Phase 5 (preflight) is now the highest-value phase — it would have flagged the smolagents/north-mini-code mismatch without spending a single run. Then raise per-run budgets and retry Milestone A.
+
+---
+
 <!-- New entries above this line -->
