@@ -3,8 +3,16 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# `make backend` runs uvicorn from backend/, so a bare ".env" resolves to
+# backend/.env and the repo-root .env is silently ignored — the API key simply
+# never arrives. Anchor to this file's location instead of the process CWD.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=(_REPO_ROOT / ".env", ".env"), extra="ignore"
+    )
 
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"

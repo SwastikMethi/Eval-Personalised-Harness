@@ -21,9 +21,36 @@ from app.orchestration.queue import QueueWorker
 from app.orchestration.recovery import reconcile
 
 
+def _install_provider() -> str:
+    """Point the model proxy at OpenRouter when a key is configured.
+
+    Without this the proxy keeps its FakeProvider default forever, so a run
+    that looks real never reaches OpenRouter at all — it just gets canned
+    completions. Absent a key we stay on the fake, which is what the test
+    suite and `make demo` rely on.
+    """
+    from app.api.proxy import set_provider
+    from app.core.config import settings
+
+    if not settings.openrouter_api_key:
+        return "fake"
+    from app.providers.openrouter import OpenRouterProvider
+
+    set_provider(
+        OpenRouterProvider(
+            api_key=settings.openrouter_api_key,
+            base_url=settings.openrouter_base_url,
+            http_referer=settings.openrouter_http_referer,
+            app_name=settings.openrouter_app_name,
+        )
+    )
+    return "openrouter"
+
+
 def create_app(start_worker: bool = True) -> FastAPI:
     setup_logging()
     ensure_schema()
+    provider_name = _install_provider()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -56,6 +83,7 @@ def create_app(start_worker: bool = True) -> FastAPI:
             await worker.stop()
 
     app = FastAPI(title="Agent Stack Optimizer", lifespan=lifespan)
+    app.state.provider_name = provider_name
     app.include_router(routes.router, prefix="/api/v1")
     app.include_router(repos_analysis.router, prefix="/api/v1")
     app.include_router(providers_api.router, prefix="/api/v1")

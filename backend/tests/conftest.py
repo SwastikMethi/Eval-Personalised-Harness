@@ -10,6 +10,13 @@ _tmp = tempfile.mkdtemp(prefix="aso-test-")
 os.environ["DATABASE_URL"] = f"sqlite:///{Path(_tmp) / 'test.db'}"
 os.environ["DATA_DIR"] = _tmp
 
+# The suite must never reach a real provider. Settings read the repo-root
+# .env, so without this the app would install OpenRouterProvider and the
+# tests would spend real quota — of which the free tier grants ~50 a DAY.
+# An explicit empty env var wins over the .env file and keeps us on
+# FakeProvider, which is what every test and `make demo` assume.
+os.environ["OPENROUTER_API_KEY"] = ""
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _schema() -> Iterator[None]:
