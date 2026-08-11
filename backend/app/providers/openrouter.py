@@ -1,9 +1,10 @@
 """OpenRouter provider (spec §4).
 
 Rules enforced here: never `openrouter/free` (it routes to arbitrary models);
-free variants identified by pricing metadata AND `:free` suffix; returned
-routing metadata recorded for reproducibility; usage estimated (and flagged)
-only when the provider omits it.
+never a moving alias (`~vendor/model` or `vendor/model-latest`) for the same
+reason; free variants identified by pricing metadata AND `:free` suffix;
+returned routing metadata recorded for reproducibility; usage estimated (and
+flagged) only when the provider omits it.
 """
 
 import json
@@ -51,6 +52,17 @@ def normalize_http_error(status: int, body_snippet: str) -> ProviderError:
         f"provider rejected request ({status}): {snippet}", ErrorCategory.MODEL_PROVIDER,
         retryable=False, status=status,
     )
+
+
+def is_moving_alias(model_id: str) -> bool:
+    """True for ids that do not name one fixed model.
+
+    OpenRouter exposes `~vendor/model` and `vendor/model-latest` aliases that
+    follow the vendor's current release. Pinning one means a rerun can silently
+    measure a different model, which is the same reason `openrouter/free` is
+    banned (spec §4: never silently replace a selected model).
+    """
+    return model_id.startswith("~") or model_id.endswith("-latest")
 
 
 def _estimate_tokens(messages: list[dict[str, Any]], content: str) -> CompletionUsage:
@@ -107,6 +119,7 @@ class OpenRouterProvider(ModelProvider):
             output_price_per_token=out_price,
             is_free=(in_price == 0 and out_price == 0) and model_id.endswith(":free"),
             availability_status="available",
+            is_alias=is_moving_alias(model_id),
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -126,6 +139,13 @@ class OpenRouterProvider(ModelProvider):
         if model_id == "openrouter/free":
             raise ProviderError(
                 "openrouter/free routes to arbitrary models and is banned for experiments",
+                ErrorCategory.MODEL_PROVIDER,
+                retryable=False,
+            )
+        if is_moving_alias(model_id):
+            raise ProviderError(
+                f"{model_id} is a moving alias — it follows the vendor's current release, so a "
+                "rerun could measure a different model. Pin the exact versioned id instead.",
                 ErrorCategory.MODEL_PROVIDER,
                 retryable=False,
             )

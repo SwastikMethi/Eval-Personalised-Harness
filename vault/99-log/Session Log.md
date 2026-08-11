@@ -160,4 +160,18 @@ Keep entries short: **what changed · why · what it unblocks · what to verify.
 
 ---
 
+## 2026-08-11 — Model list was 402 entries, 12 of them unusable by design
+
+**Why.** The user: *"It is showing many models in the models section."* Three problems behind it, one a real correctness bug.
+
+1. **402 models in a flat checkbox list.** The wizard called `api.models(false)`. Only 14 of 402 are free, and this account has no credits, so the rest were 388 ways to fail. Now free-only by default with an explicit `include paid` opt-in, a name filter, and a count in the header.
+2. **Closed-source paid models were selectable** (Claude, Gemini). Spec §2 puts them out of scope. Revealing them now carries a warning that says so, and notes open-weight-but-paid (Kimi, GLM) is fine with credits.
+3. **12 moving aliases were pinnable** — `~anthropic/claude-opus-latest` and friends. These follow the vendor's current release, so **a rerun could silently measure a different model**. That is exactly the hazard §4 bans `openrouter/free` for, and it would quietly invalidate any longitudinal comparison.
+
+**Fix location matters.** The alias ban went into `providers/openrouter.py` beside the existing `openrouter/free` ban — same rule, same place — as `is_moving_alias()` plus an `is_alias` flag on `ModelInfo`. `validate_model()` now refuses to pin one, so the listing excludes them by default rather than offering a choice that fails at snapshot time. The API also sorts free and tool-capable first, because with 400 models the ordering *is* the usability.
+
+**Verified.** Default listing returns 14, `free_only=false` returns 390 (402 − 12 aliases), and zero aliases in either. Suite 112 backend (+3) and 22 frontend; lint, typecheck, build green. Recorded in [[Free Models]].
+
+---
+
 <!-- New entries above this line -->

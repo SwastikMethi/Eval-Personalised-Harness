@@ -25,6 +25,8 @@ export interface ModelInfo {
   context_length: number | null
   supports_tools: boolean
   is_free: boolean
+  /** Moving alias (`~vendor/model`, `-latest`) — never pinnable, excluded by default. */
+  is_alias?: boolean
 }
 
 export interface Analysis {

@@ -30,6 +30,21 @@ MODELS_PAYLOAD = {
             "pricing": {"prompt": "0", "completion": "0"},
             "supported_parameters": [],
         },
+        # Moving aliases: OpenRouter really does list both of these shapes.
+        {
+            "id": "~vendor/model-latest",
+            "name": "Vendor Model (latest)",
+            "context_length": 200000,
+            "pricing": {"prompt": "0.000001", "completion": "0.000002"},
+            "supported_parameters": ["tools"],
+        },
+        {
+            "id": "vendor/other-latest",
+            "name": "Vendor Other (latest)",
+            "context_length": 200000,
+            "pricing": {"prompt": "0.000001", "completion": "0.000002"},
+            "supported_parameters": ["tools"],
+        },
     ]
 }
 
@@ -58,6 +73,21 @@ async def test_openrouter_free_banned() -> None:
 async def test_unknown_model_rejected() -> None:
     with pytest.raises(ProviderError, match="not available"):
         await provider_with(models_handler).validate_model("nope/nope")
+
+
+async def test_moving_aliases_are_flagged() -> None:
+    """`~vendor/model` and `-latest` follow the vendor's current release, so a
+    rerun could measure a different model — the openrouter/free hazard again."""
+    models = {m.model_id: m for m in await provider_with(models_handler).list_models()}
+    assert models["~vendor/model-latest"].is_alias is True
+    assert models["vendor/other-latest"].is_alias is True
+    assert models["qwen/qwen-2.5-coder:free"].is_alias is False
+
+
+@pytest.mark.parametrize("alias", ["~vendor/model-latest", "vendor/other-latest"])
+async def test_moving_alias_cannot_be_pinned(alias: str) -> None:
+    with pytest.raises(ProviderError, match="moving alias"):
+        await provider_with(models_handler).validate_model(alias)
 
 
 @pytest.mark.parametrize(

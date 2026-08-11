@@ -15,6 +15,11 @@ class ModelInfo:
     output_price_per_token: float
     is_free: bool
     availability_status: str
+    # A moving alias (`~vendor/model`, `vendor/model-latest`) resolves to
+    # whatever is current, so the underlying model can change between runs.
+    # That is the same hazard `openrouter/free` is banned for — it destroys a
+    # controlled comparison — so aliases are never pinnable.
+    is_alias: bool = False
 
 
 @dataclass

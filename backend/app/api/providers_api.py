@@ -29,12 +29,28 @@ async def test_connection() -> dict[str, Any]:
 
 
 @router.get("/providers/openrouter/models")
-async def list_free_models(free_only: bool = True) -> list[dict[str, Any]]:
+async def list_free_models(
+    free_only: bool = True, include_aliases: bool = False
+) -> list[dict[str, Any]]:
+    """Selectable models.
+
+    Moving aliases are excluded by default: `validate_model` refuses to pin
+    them, so offering them would only let a user choose something that fails at
+    snapshot time. Sorted so free, tool-capable models come first — with 400+
+    models the ordering is the difference between usable and unusable.
+    """
     try:
         models = await _openrouter().list_models()
     except ProviderError as exc:
         raise HTTPException(502, f"[{exc.category}] {exc}") from exc
-    return [asdict(m) for m in models if m.is_free or not free_only]
+
+    selectable = [
+        m
+        for m in models
+        if (m.is_free or not free_only) and (include_aliases or not m.is_alias)
+    ]
+    selectable.sort(key=lambda m: (not m.is_free, not m.supports_tools, m.model_id))
+    return [asdict(m) for m in selectable]
 
 
 @router.post("/providers/openrouter/models/{model_id:path}/snapshot")

@@ -65,6 +65,7 @@ Cheap in absolute terms, but the account has no credits.
 ## Rules that bind model choice
 
 - **Never** use `openrouter/free` — it routes to arbitrary underlying models and destroys controlled comparison. The provider bans it explicitly.
+- **Never** use a moving alias — `~vendor/model` or `vendor/model-latest`. OpenRouter lists 12 of them (e.g. `~anthropic/claude-opus-latest`). They follow the vendor's current release, so a rerun can silently measure a *different* model. Same hazard as `openrouter/free`, so `validate_model()` rejects them and the listing excludes them by default. Found 2026-08-11 when they showed up as selectable in the wizard.
 - Identify free variants by pricing metadata **and** the `:free` suffix.
 - Save the exact model ID and metadata with every experiment (`ModelSnapshot`).
 - **Never silently replace a selected model.** If one becomes unavailable, fail that combination clearly.

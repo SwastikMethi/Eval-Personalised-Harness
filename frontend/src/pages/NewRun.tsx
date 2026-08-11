@@ -72,11 +72,15 @@ export default function NewRun() {
   const [reps, setReps] = useState(1)
   const [budget, setBudget] = useState(8)
   const [setupOpen, setSetupOpen] = useState(false)
+  // Free-only by default: of 400+ models on OpenRouter only ~14 are free, and
+  // this account has no credits, so listing the rest is 400 ways to fail.
+  const [showPaid, setShowPaid] = useState(false)
+  const [modelFilter, setModelFilter] = useState('')
 
   const availableHarnesses = useQuery({ queryKey: ['harnesses'], queryFn: api.harnesses })
   const availableModels = useQuery({
-    queryKey: ['models'],
-    queryFn: () => api.models(false),
+    queryKey: ['models', showPaid],
+    queryFn: () => api.models(!showPaid),
     staleTime: 300_000,
   })
   const commits = useQuery({
@@ -217,10 +221,12 @@ export default function NewRun() {
   const toggle = (list: string[], value: string, set: (v: string[]) => void) =>
     set(list.includes(value) ? list.filter((v) => v !== value) : [...list, value])
 
-  const sortedModels = useMemo(
-    () => (availableModels.data ?? []).slice().sort((a, b) => a.model_id.localeCompare(b.model_id)),
-    [availableModels.data],
-  )
+  // Backend already sorts free + tool-capable first; this only narrows.
+  const sortedModels = useMemo(() => {
+    const q = modelFilter.trim().toLowerCase()
+    const all = availableModels.data ?? []
+    return q ? all.filter((m) => m.model_id.toLowerCase().includes(q)) : all
+  }, [availableModels.data, modelFilter])
 
   const baselineLabel = runBaseline.isPending
     ? 'baseline running…'
@@ -496,13 +502,48 @@ export default function NewRun() {
               ))}
             </Panel>
 
-            <Panel label="Models">
+            <Panel
+              label={`Models · ${sortedModels.length}`}
+              action={
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      size="small"
+                      checked={showPaid}
+                      onChange={(e) => {
+                        setShowPaid(e.target.checked)
+                        setModels([])
+                      }}
+                    />
+                  }
+                  label={
+                    <Typography sx={{ fontSize: '0.75rem', color: C.dim }}>
+                      include paid
+                    </Typography>
+                  }
+                />
+              }
+            >
               {availableModels.isLoading && <CircularProgress size={16} />}
               {availableModels.isError && (
                 <Alert severity="warning">
                   Could not list models — check OPENROUTER_API_KEY in .env.
                 </Alert>
               )}
+              {showPaid && (
+                <Alert severity="warning" sx={{ mb: 1.5 }}>
+                  Paid models need OpenRouter credits, and spec §2 puts closed-source models out of
+                  scope — this tool benchmarks open-weight stacks. Open-weight-but-paid models
+                  (Kimi, GLM) are fine if you have credits.
+                </Alert>
+              )}
+              <TextField
+                fullWidth
+                value={modelFilter}
+                onChange={(e) => setModelFilter(e.target.value)}
+                placeholder="filter by name…"
+                sx={{ mb: 1.5 }}
+              />
               <Box sx={{ maxHeight: 300, overflowY: 'auto' }}>
                 {sortedModels.map((m) => (
                   <FormControlLabel
