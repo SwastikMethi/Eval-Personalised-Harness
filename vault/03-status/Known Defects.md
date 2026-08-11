@@ -8,7 +8,7 @@ updated: 2026-08-11
 
 Defects found by reading code on 2026-08-11. **Each one blocks a real benchmark run.** Index: [[00 Index]].
 
-**Status: 5 of 8 fixed** (#1, #2, #3 — Phase 2; #7, #8 — Phase 1). Remaining: **#4, #5, #6** — all Phase 3.
+**Status: all 8 fixed** (#1–#3 Phase 2 · #4–#6 Phase 3 · #7–#8 Phase 1). Kept as a record of what was wrong and what guards it now.
 
 Line references are to the state at branch `worktree-aso-full-build` creation; re-grep before trusting them.
 
@@ -40,33 +40,37 @@ Now: `derive_config()` supplies install/build/test/lint/typecheck and `test_fram
 
 ---
 
-## 4. Cost accounting is inert 🟠
+## 4. Cost accounting is inert ✅ FIXED (Phase 3, 2026-08-11)
 
-`queue.py:212` calls `issue_run_token()` without `input_price` / `output_price`, so `entry.cost_usd` (`proxy.py:165-168`) never leaves `0.0` and the ceiling at `proxy.py:110` can never fire.
+Was: `issue_run_token()` was called without `input_price` / `output_price`, so `cost_usd` never left `0.0` and the spend ceiling could never fire no matter how much was spent.
 
-Free models make this $0 anyway — but §14 requires cost recorded even when zero, and this same path is the only guard on a future paid key.
-
-**Fixed in:** Phase 3.
+Now: `queue.py::_model_prices()` reads per-token prices from the pinned `ModelSnapshot` and passes them through. Free models still record $0.00, as §14 requires.
 
 ---
 
-## 5. The proxy destroys tool calls 🔴
+## 5. The proxy destroys tool calls ✅ FIXED (Phase 3, 2026-08-11)
 
-`proxy.py:180-195` returns a hand-built response containing only `message.content` and a hardcoded `finish_reason: "stop"`. `ChatRequest` (`proxy.py:139`) has no `tools` field, so tool definitions are dropped inbound and tool calls dropped outbound.
+Was: the proxy returned a hand-built response containing only `message.content` with a hardcoded `finish_reason: "stop"`, and `ChatRequest` had no `tools` field — so tool definitions were dropped inbound and tool calls dropped outbound. A harness would believe the model answered when it had actually asked to call a tool.
 
-**Consequence:** smolagents survives (it parses code from content). **OpenHands cannot work at all.**
+Now: `ChatRequest` accepts `tools`, `tool_choice`, `response_format`; the provider forwards them; `CompletionResult` carries the provider's `message` and real `finish_reason`, and the proxy returns them untouched. `content=None` on a tool-calling reply is handled rather than treated as malformed.
 
-**Fixed in:** Phase 3 — prerequisite for Phase 10.
+**Unblocks:** OpenHands (Phase 10).
 
 ---
 
-## 6. Rate limiting fails the run 🔴
+## 6. Rate limiting fails the run ✅ FIXED (Phase 3, 2026-08-11)
 
-The proxy maps 429 correctly, but `queue.py:175-177` catches *every* exception into `FAILED(HARNESS)`. Nothing ever transitions into `RATE_LIMITED`.
+Was: the proxy mapped 429 correctly but the queue caught *every* exception into `FAILED(HARNESS)`. Nothing ever entered `RATE_LIMITED`, so under [[Rate Limits]] (~50 requests/day) ordinary throttling both lost the run and poisoned the reliability statistics with a failure the agent never caused.
 
-**Consequence:** violates [[Acceptance Criteria]] #24 — and under [[Rate Limits]] (~50 requests/day) this fires constantly, writing spurious `FAILED` rows that corrupt results.
+Now: the proxy records `rate_limited` on the run token, so the orchestrator distinguishes "provider throttled us" from "the harness broke" without parsing error strings. A throttled run goes `RUNNING → RATE_LIMITED` with a **persisted** `retry_after` deadline (escalating 30s → 120s → 600s), and `_release_rate_limited()` returns it to `PENDING` when the deadline passes. Persisting the deadline means a parked run survives a restart.
 
-**Fixed in:** Phase 3. **Must land before any real run.**
+**Satisfies:** [[Acceptance Criteria]] #24.
+
+---
+
+## 9. Test schema depended on collection order ✅ FIXED (Phase 3, 2026-08-11)
+
+Found while adding Phase 3 tests. The test database was only migrated as a *side effect* of some test calling `create_app()`, so a module touching the DB directly passed or failed depending on which tests ran first. Now an autouse session fixture in `conftest.py` runs `ensure_schema()` up front — which also means the suite exercises the real migration path.
 
 ---
 

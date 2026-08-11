@@ -108,6 +108,10 @@ class BenchmarkRun(Base, IdTimestampMixin):
     started_at: Mapped[datetime | None] = mapped_column(default=None)
     completed_at: Mapped[datetime | None] = mapped_column(default=None)
     heartbeat_at: Mapped[datetime | None] = mapped_column(default=None)
+    # When a RATE_LIMITED run may return to PENDING. Persisted rather than held
+    # in the worker so a backoff survives a restart (spec §13: recover queued
+    # experiment state) — at ~50 free requests/day this is the normal path.
+    retry_after: Mapped[datetime | None] = mapped_column(default=None)
     result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 

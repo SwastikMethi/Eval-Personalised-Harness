@@ -8,9 +8,9 @@ updated: 2026-08-11
 
 Source: `generationDoc.md` §30. Index: [[00 Index]].
 
-**Live tally: 19 pass · 3 partial · 3 fail.** Update this note as phases land — it is the single scoreboard for "is the MVP done".
+**Live tally: 20 pass · 3 partial · 2 fail.** Update this note as phases land — it is the single scoreboard for "is the MVP done".
 
-> Baseline at the start of this work was **17 pass · 4 partial · 4 fail**. (An earlier draft of this note said 15/5/5; that was a miscount of the table below.) Phase 2 moved #10 ❌→✅ and #11 ⚠️→✅.
+> Baseline at the start of this work was **17 pass · 4 partial · 4 fail**. (An earlier draft of this note said 15/5/5; that was a miscount of the table below.) Phase 2 moved #10 ❌→✅ and #11 ⚠️→✅; Phase 3 moved #24 ❌→✅.
 
 | # | Criterion | Status | Notes |
 |---|---|---|---|
@@ -37,7 +37,7 @@ Source: `generationDoc.md` §30. Index: [[00 Index]].
 | 21 | Compare combinations | ✅ | comparison table + aggregation |
 | 22 | Best quality/reliability/efficiency/balanced recommendations | ✅ | 4 cards, Pareto frontiers |
 | 23 | Weak evaluation signal clearly identified | ✅ | `INSUFFICIENT_EVALUATION_SIGNAL` |
-| 24 | **Provider rate limiting does not crash the experiment** | ❌ | 429 → `FAILED`, never `RATE_LIMITED` — [[Known Defects]] #6 |
+| 24 | Provider rate limiting does not crash the experiment | ✅ | Phase 3 — 429 → `RATE_LIMITED` with persisted escalating backoff, then `PENDING` |
 | 25 | Automated tests and a working fixture demo | ⚠️ | 77 backend tests pass; **zero** frontend tests, `make test-frontend` is a false green |
 
 ## Which phase fixes what

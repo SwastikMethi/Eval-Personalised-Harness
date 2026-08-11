@@ -62,4 +62,24 @@ Keep entries short: **what changed · why · what it unblocks · what to verify.
 
 ---
 
+## 2026-08-11 — Phase 3: proxy hardened for quota and tool calls
+
+**What.** Fixes [[Known Defects]] #4, #5, #6 — the last three blockers before a real model run.
+
+**Rate limiting.** The proxy now records `rate_limited` on the run token, so the orchestrator tells "provider throttled us" apart from "the harness broke" without parsing error strings. A throttled run goes `RUNNING → RATE_LIMITED` with a **persisted** `retry_after` (new column + migration), escalating 30s → 120s → 600s, and `_release_rate_limited()` returns it to `PENDING` on the next claim. Persisting the deadline is what lets a parked run survive a restart — at ~50 requests/day this is the ordinary path, not an edge case.
+
+**Tool calls.** `CompletionResult` carries the provider's `message` and real `finish_reason`; the proxy forwards them instead of rebuilding `{"role","content"}` with a hardcoded `"stop"`. `ChatRequest` accepts `tools`/`tool_choice`/`response_format` and the provider passes them upstream. `content=None` on a tool-calling reply no longer reads as a malformed response. Unblocks OpenHands.
+
+**Cost.** `_model_prices()` reads per-token prices from the pinned `ModelSnapshot`, so `cost_usd` accrues and the spend ceiling can actually fire. $0.00 on free models, but recorded, per §14.
+
+**Quota visibility.** `max_model_requests` now defaults to **8** ([[ADR-003 Free Tier Constraints]]), and per-run usage is written into `run.result` so burn is visible before it runs out.
+
+**Bug found while testing.** The test database was migrated only as a *side effect* of some test calling `create_app()`, so a module touching the DB directly passed or failed by collection order. Now an autouse session fixture runs `ensure_schema()` up front. Recorded as [[Known Defects]] #9.
+
+**Verified.** 5 new tests: 429 flags the run, cost accrues until the ceiling fires, tool definitions reach the provider and `tool_calls` return with `finish_reason: "tool_calls"`, parked-then-released backoff, and escalating delays. Suite 90 backend + 7 frontend; lint, typecheck, demo green.
+
+**Next.** Phase 4 — smolagents harness, then Milestone A.
+
+---
+
 <!-- New entries above this line -->

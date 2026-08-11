@@ -44,6 +44,7 @@ class RunToken:
     cost_usd: float = 0.0
     input_price: float = 0.0
     output_price: float = 0.0
+    rate_limited: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -87,6 +88,21 @@ def renew_run_token(run_id: str) -> None:
     entry = _active_tokens.get(run_id)
     if entry is not None:
         entry.expires_at = time.time() + TOKEN_TTL_S
+
+
+def run_usage(run_id: str) -> dict[str, Any]:
+    """Observed usage for a run. Read before `revoke_run_token` clears it."""
+    entry = _active_tokens.get(run_id)
+    if entry is None:
+        return {}
+    return {
+        "requests": entry.requests,
+        "input_tokens": entry.input_tokens,
+        "output_tokens": entry.output_tokens,
+        "cost_usd": round(entry.cost_usd, 6),
+        "rate_limited": entry.rate_limited,
+        "budget_exhausted": entry.requests >= entry.max_requests,
+    }
 
 
 def revoke_run_token(run_id: str) -> None:
@@ -141,6 +157,11 @@ class ChatRequest(BaseModel):
     messages: list[dict[str, Any]]
     temperature: float | None = None
     max_tokens: int | None = None
+    # Function calling: dropping these silently turns a tool-using harness into
+    # a plain chat client that never edits anything (spec §21 compatibility).
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: Any | None = None
+    response_format: dict[str, Any] | None = None
 
 
 @router.post("/v1/chat/completions")
@@ -151,13 +172,24 @@ async def chat_completions(
     start = time.monotonic()
     try:
         result = await _provider.complete(
-            body.model, body.messages, temperature=body.temperature, max_tokens=body.max_tokens
+            body.model,
+            body.messages,
+            temperature=body.temperature,
+            max_tokens=body.max_tokens,
+            tools=body.tools,
+            tool_choice=body.tool_choice,
+            response_format=body.response_format,
         )
     except ProviderError as exc:
         latency = int((time.monotonic() - start) * 1000)
         _record_metric(entry, latency, None, exc.status or 502, {"error": str(exc)})
-        status = 429 if exc.category is ErrorCategory.RATE_LIMITED else 502
-        raise HTTPException(status, f"provider error [{exc.category}]: {exc}") from exc
+        if exc.category is ErrorCategory.RATE_LIMITED:
+            # Remembered on the run token so the orchestrator can distinguish
+            # "provider throttled us" from "the harness broke" after the fact,
+            # without parsing harness error strings.
+            entry.rate_limited = True
+            raise HTTPException(429, f"provider error [{exc.category}]: {exc}") from exc
+        raise HTTPException(502, f"provider error [{exc.category}]: {exc}") from exc
     latency = int((time.monotonic() - start) * 1000)
 
     if result.usage.input_tokens:
@@ -177,6 +209,11 @@ async def chat_completions(
             "duration": latency,
         },
     )
+    # Forward the provider's own message rather than rebuilding it: a
+    # hand-built {"role","content"} drops tool_calls and forces finish_reason
+    # to "stop", which makes function-calling harnesses believe the model
+    # answered when it actually asked to call a tool.
+    message = result.message or {"role": "assistant", "content": result.content}
     return {
         "id": "proxy-cmpl",
         "object": "chat.completion",
@@ -184,8 +221,8 @@ async def chat_completions(
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": result.content},
-                "finish_reason": "stop",
+                "message": message,
+                "finish_reason": result.finish_reason or "stop",
             }
         ],
         "usage": {

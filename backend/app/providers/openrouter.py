@@ -149,7 +149,9 @@ class OpenRouterProvider(ModelProvider):
         self, model_id: str, messages: list[dict[str, Any]], **kwargs: Any
     ) -> CompletionResult:
         payload: dict[str, Any] = {"model": model_id, "messages": messages}
-        for key in ("temperature", "max_tokens"):
+        # tools/tool_choice must reach the provider or function-calling
+        # harnesses silently degrade into plain chat.
+        for key in ("temperature", "max_tokens", "tools", "tool_choice", "response_format"):
             if kwargs.get(key) is not None:
                 payload[key] = kwargs[key]
         try:
@@ -163,11 +165,15 @@ class OpenRouterProvider(ModelProvider):
             raise normalize_http_error(resp.status_code, resp.text)
         try:
             body = resp.json()
-            content = body["choices"][0]["message"]["content"]
+            choice = body["choices"][0]
+            message = choice["message"]
         except (json.JSONDecodeError, KeyError, IndexError) as exc:
             raise ProviderError(
                 "invalid completion response", ErrorCategory.MODEL_PROVIDER, retryable=True
             ) from exc
+        # A tool-calling reply legitimately has content=None; treating that as
+        # a malformed response would break every function-calling harness.
+        content = message.get("content") or ""
         usage_raw = body.get("usage") or {}
         if usage_raw.get("prompt_tokens") is not None:
             usage = CompletionUsage(
@@ -183,6 +189,8 @@ class OpenRouterProvider(ModelProvider):
         return CompletionResult(
             content=content,
             usage=usage,
+            message=message,
+            finish_reason=choice.get("finish_reason"),
             raw={
                 # Reproducibility: which upstream actually served this request.
                 "routed_model": body.get("model"),

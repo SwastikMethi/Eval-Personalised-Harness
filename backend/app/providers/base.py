@@ -30,6 +30,12 @@ class CompletionResult:
     content: str
     usage: CompletionUsage
     raw: dict[str, Any]
+    # The provider's assistant message verbatim, including `tool_calls`, and
+    # the real finish_reason. Harnesses that use function calling are broken by
+    # anything that rebuilds the message from `content` alone, so the proxy
+    # forwards these untouched. None means the provider returned neither.
+    message: dict[str, Any] | None = None
+    finish_reason: str | None = None
 
 
 class ModelProvider(ABC):

@@ -17,14 +17,14 @@ import hashlib
 import logging
 import shutil
 import tempfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.api.proxy import issue_run_token, revoke_run_token
+from app.api.proxy import issue_run_token, revoke_run_token, run_usage
 from app.core.config import settings
 from app.core.errors import ErrorCategory
 from app.harnesses.base import HarnessRunRequest, get_harness
@@ -35,6 +35,7 @@ from app.models import (
     Experiment,
     ExperimentCombination,
     HiddenTestCandidate,
+    ModelSnapshot,
     Repository,
     RunEvent,
 )
@@ -44,6 +45,15 @@ from app.repositories import service
 log = logging.getLogger(__name__)
 
 SANDBOXED_HARNESSES = {"mini-swe-agent"}
+
+# Free-tier OpenRouter allows roughly 50 model requests per DAY without
+# credits, so a generous per-run budget burns the whole quota on one run.
+# See vault/05-decisions/ADR-003 Free Tier Constraints.md.
+DEFAULT_MAX_MODEL_REQUESTS = 8
+
+# Backoff before a RATE_LIMITED run returns to PENDING. Capped because the
+# limit that matters is daily: retrying sooner just re-spends the quota.
+RATE_LIMIT_BACKOFF_S = (30.0, 120.0, 600.0)
 # Sandboxed harnesses reach the proxy through the host gateway on the port
 # uvicorn actually listens on (Makefile `backend` target and settings agree).
 DOCKER_PROXY_BASE = f"http://host.docker.internal:{settings.backend_port}/proxy"
@@ -185,6 +195,7 @@ class QueueWorker:
                 pass
 
     def _claim_next(self) -> str | None:
+        self._release_rate_limited()
         with self._sessions() as session:
             pending = session.scalars(
                 select(BenchmarkRun)
@@ -246,11 +257,19 @@ class QueueWorker:
         try:
             materialize_workspace(task, repo, config, workspace)
 
+            in_price, out_price = self._model_prices(model_id)
             token = issue_run_token(
                 run_id,
                 model_id,
-                max_requests=int(config.get("max_model_requests", 50)),
+                max_requests=int(
+                    config.get("max_model_requests", DEFAULT_MAX_MODEL_REQUESTS)
+                ),
                 max_cost_usd=config.get("max_cost_usd"),
+                # Without prices the proxy accrues 0.0 forever and the spend
+                # ceiling can never fire. Free models make this $0.00, but
+                # spec §14 wants cost recorded even when it is zero.
+                input_price=in_price,
+                output_price=out_price,
             )
             proxy_base = self._proxy_base_url
             if sandboxed:
@@ -285,6 +304,15 @@ class QueueWorker:
                 session.commit()
 
             result = await harness.run(request)
+            usage = run_usage(run_id)
+
+            # Provider throttling is not a harness bug. Park the run and let it
+            # come back rather than burning it as FAILED (spec §30 criterion 24)
+            # — at ~50 free requests/day this is the ordinary path, and a
+            # spurious FAILED row would corrupt the reliability statistics.
+            if usage.get("rate_limited") and result.status != "completed":
+                self._rate_limit(run_id, usage)
+                return
 
             with self._sessions() as session:
                 run = session.get(BenchmarkRun, run_id)
@@ -325,6 +353,8 @@ class QueueWorker:
                     "commands_executed": result.commands_executed,
                     "evaluation_signal": evaluation.get("signal"),
                     "score": evaluation.get("score"),
+                    # Quota burn must be visible before it runs out, not after.
+                    "usage": usage,
                 }
                 self._event(session, run_id, result.status, {"patch_produced": patch_produced})
                 session.commit()
@@ -390,6 +420,69 @@ class QueueWorker:
             )
             session.commit()
         return {"signal": outcome.signal, "score": outcome.score}
+
+    def _rate_limit(self, run_id: str, usage: dict[str, Any]) -> None:
+        """RUNNING → RATE_LIMITED with a persisted backoff deadline."""
+        with self._sessions() as session:
+            run = session.get(BenchmarkRun, run_id)
+            if run is None or RunState(run.state) is not RunState.RUNNING:
+                return
+            attempts = session.scalars(
+                select(RunEvent).where(
+                    RunEvent.run_id == run_id, RunEvent.event_type == "rate_limited"
+                )
+            ).all()
+            delay = RATE_LIMIT_BACKOFF_S[min(len(attempts), len(RATE_LIMIT_BACKOFF_S) - 1)]
+            transition(run, RunState.RATE_LIMITED)
+            run.error_category = ErrorCategory.RATE_LIMITED
+            run.error_message = "provider rate limited; queued for retry"
+            run.retry_after = datetime.now(UTC) + timedelta(seconds=delay)
+            run.result = {**(run.result or {}), "usage": usage}
+            self._event(session, run_id, "rate_limited", {"retry_in_s": delay, **usage})
+            session.commit()
+        log.info(
+            "run rate limited",
+            extra={"run_id": run_id, "event_type": "rate_limited", "duration": delay},
+        )
+
+    def _release_rate_limited(self) -> None:
+        """RATE_LIMITED → PENDING once the backoff has elapsed."""
+        now = datetime.now(UTC)
+        with self._sessions() as session:
+            parked = session.scalars(
+                select(BenchmarkRun).where(BenchmarkRun.state == RunState.RATE_LIMITED)
+            ).all()
+            released = False
+            for run in parked:
+                deadline = run.retry_after
+                # Rows written before this column existed, or by an older
+                # process, have no deadline — release rather than strand them.
+                if deadline is not None:
+                    if deadline.tzinfo is None:
+                        deadline = deadline.replace(tzinfo=UTC)
+                    if deadline > now:
+                        continue
+                transition(run, RunState.PENDING)
+                run.retry_after = None
+                released = True
+            if released:
+                session.commit()
+
+    def _model_prices(self, model_id: str) -> tuple[float, float]:
+        """Per-token prices from the pinned snapshot; (0, 0) when unknown."""
+        with self._sessions() as session:
+            snapshot = session.scalars(
+                select(ModelSnapshot)
+                .where(ModelSnapshot.model_id == model_id)
+                .order_by(ModelSnapshot.created_at.desc())
+            ).first()
+        if snapshot is None:
+            return 0.0, 0.0
+        meta = snapshot.meta or {}
+        return (
+            float(meta.get("input_price_per_token") or 0.0),
+            float(meta.get("output_price_per_token") or 0.0),
+        )
 
     def _store_patch(self, run_id: str, patch: str) -> None:
         """Atomic artifact write (tmp+rename) with checksum in DB."""
