@@ -40,8 +40,10 @@ def create_app(start_worker: bool = True) -> FastAPI:
             if docker_available():
                 sandboxes = SandboxManager()
                 from app.harnesses.mini_swe_agent import MiniSweAgentHarness
+                from app.harnesses.smolagents_agent import SmolagentsHarness
 
                 register(MiniSweAgentHarness(sandboxes))
+                register(SmolagentsHarness(sandboxes))
             worker = QueueWorker(
                 SessionLocal,
                 proxy_base_url="http://aso.local/proxy",

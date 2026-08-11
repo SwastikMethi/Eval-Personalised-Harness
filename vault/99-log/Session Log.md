@@ -82,4 +82,20 @@ Keep entries short: **what changed · why · what it unblocks · what to verify.
 
 ---
 
+## 2026-08-11 — Phase 4: smolagents harness (two harnesses live)
+
+**What.** `app/harnesses/smolagents_agent.py`, registered in `main.py` and added to `SANDBOXED_HARNESSES`. `smolagents==1.26.0` pinned into the sandbox image alongside `mini-swe-agent==1.14.0`. The matrix can now actually compare two harnesses — see [[Product Goal]] on why that is the whole point.
+
+**API verified, not guessed** (spec §3). Introspected smolagents 1.26.0 directly: `OpenAIServerModel(model_id, api_base, api_key)` targets the run-scoped proxy; `CodeAgent(tools, model, max_steps, additional_authorized_imports)`; `run(task, return_full_result=True) → RunResult(output, steps, token_usage, ...)`.
+
+**The finding that mattered.** smolagents' local Python executor does **not** expose the `open` builtin, so a CodeAgent cannot write files with it. Probing showed `pathlib` works once authorized — so `additional_authorized_imports` includes `pathlib` (plus os/sys/re/json/shutil/subprocess). Without this every run would produce an empty patch that *looks* like a model failure but is really a config bug.
+
+**Design.** The runner script and task text are base64'd into the container's `/tmp` (tmpfs), never `/workspace` — anything written there would be swept up by `git add -A && git diff --cached` and graded as the agent's own patch. Unlike mini-SWE-agent, smolagents reports real token usage, so it is recorded rather than left null.
+
+**Verified.** 6 adapter tests against a stubbed sandbox: real usage reported, runner/task confined to /tmp, run token passed as env and never written to disk (and no real key anywhere), agent failure categorized rather than swallowed, unparseable report doesn't crash or fabricate, missing dependency fails loudly. Image confirmed to carry smolagents 1.26.0 + mini-swe-agent + git. Suite 96 backend + 7 frontend; lint, typecheck, demo green.
+
+**Next.** [[Milestones]] Milestone A. Plan: validate one real cell (~8 requests) before spending the rest of the daily quota on all six.
+
+---
+
 <!-- New entries above this line -->

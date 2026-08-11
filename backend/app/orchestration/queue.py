@@ -44,7 +44,7 @@ from app.repositories import service
 
 log = logging.getLogger(__name__)
 
-SANDBOXED_HARNESSES = {"mini-swe-agent"}
+SANDBOXED_HARNESSES = {"mini-swe-agent", "smolagents"}
 
 # Free-tier OpenRouter allows roughly 50 model requests per DAY without
 # credits, so a generous per-run budget burns the whole quota on one run.
