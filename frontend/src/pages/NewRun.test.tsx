@@ -5,78 +5,144 @@ import NewRun from './NewRun'
 import { renderScreen } from '../test/render'
 import { http, HttpResponse, server } from '../test/server'
 
-/** Drive the wizard to the Matrix step so the quota maths can be asserted. */
-async function reachMatrixStep() {
+const ANALYSIS = {
+  languages: ['python'],
+  package_managers: ['pip'],
+  dependency_files: [],
+  test_locations: ['tests/'],
+  ci_workflows: [],
+  runtime_versions: {},
+  supported: true,
+  size_bytes: 1_200_000,
+  // Only `test` is detected — build/lint/typecheck legitimately absent.
+  commands: { install: null, build: null, test: 'pytest -q', test_framework: 'pytest' },
+}
+
+const BASELINE = {
+  baseline_id: 'b1',
+  base_commit: 'abc123',
+  benchmarkable: true,
+  warn: false,
+  steps: { test: { exit_code: 0 } },
+  test_case_count: 12,
+}
+
+const COMMITS = [
+  {
+    sha: 'aaaaaaaa1111',
+    subject: 'Fix median() for even-length lists',
+    author: 'you',
+    date: '2026-08-01T10:00:00Z',
+    parent: 'parent1',
+  },
+  {
+    sha: 'bbbbbbbb2222',
+    subject: 'Add input validation',
+    author: 'you',
+    date: '2026-07-30T10:00:00Z',
+    parent: 'parent2',
+  },
+]
+
+function mockRepo(over: { analysis?: unknown; baseline?: unknown } = {}) {
   server.use(
     http.post('/api/v1/repositories', () => HttpResponse.json({ id: 'r1' })),
     http.post('/api/v1/repositories/:id/analyze', () =>
       HttpResponse.json({ analysis_id: 'a1', supported: true }),
     ),
     http.get('/api/v1/repositories/:id/analysis', () =>
-      HttpResponse.json({
-        languages: ['python'],
-        package_managers: ['pip'],
-        dependency_files: [],
-        test_locations: ['tests/'],
-        ci_workflows: [],
-        runtime_versions: {},
-        supported: true,
-        size_bytes: 1_200_000,
-        commands: { install: null, build: null, test: 'pytest -q', test_framework: 'pytest' },
-      }),
+      HttpResponse.json((over.analysis ?? ANALYSIS) as never),
+    ),
+    http.post('/api/v1/repositories/:id/baseline', () =>
+      HttpResponse.json((over.baseline ?? BASELINE) as never),
     ),
     http.put('/api/v1/repositories/:id/commands', () => HttpResponse.json({ ok: true })),
-    http.post('/api/v1/repositories/:id/baseline', () =>
-      HttpResponse.json({
-        baseline_id: 'b1',
-        benchmarkable: true,
-        warn: false,
-        steps: { test: { exit_code: 0 } },
-      }),
+    http.get('/api/v1/repositories/:id/commits', () => HttpResponse.json(COMMITS)),
+    http.post('/api/v1/tasks/from-commit', () =>
+      HttpResponse.json({ id: 'task1', base_commit: 'parent1', hidden_test_candidates: 0 }),
     ),
-    http.post('/api/v1/tasks', () => HttpResponse.json({ id: 'task1' })),
   )
+}
 
+/** Repo → tick a commit → land on the combos step. */
+async function reachCombos() {
   const user = userEvent.setup()
   renderScreen(<NewRun />)
-
   await user.type(screen.getByPlaceholderText(/Projects\/your-repo/), '/tmp/repo')
   await user.click(screen.getByRole('button', { name: /Analyze repository/ }))
-
-  await user.click(await screen.findByRole('button', { name: /Save and continue/ }))
-  await user.click(await screen.findByRole('button', { name: /Run baseline/ }))
+  await user.click(await screen.findByLabelText(/Fix median/))
   await user.click(await screen.findByRole('button', { name: /^Continue$/ }))
-
-  await user.type(await screen.findByLabelText('title'), 'Fix median')
-  await user.type(screen.getByLabelText('prompt'), 'median() is wrong for even lists')
-  await user.click(screen.getByRole('button', { name: /Add task/ }))
-  await user.click(await screen.findByRole('button', { name: /^Continue$/ }))
-
   return user
 }
 
 describe('NewRun wizard', () => {
-  it('will not start a run with nothing selected', async () => {
-    const user = await reachMatrixStep()
+  it('reaches the combos step without ever asking for build or typecheck', async () => {
+    mockRepo()
+    await reachCombos()
+
+    // The whole point: the user got here without meeting an optional field.
+    expect(await screen.findByText('Harnesses')).toBeInTheDocument()
+    expect(screen.queryByLabelText('build (optional)')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('typecheck (optional)')).not.toBeInTheDocument()
+  })
+
+  it('keeps setup collapsed when nothing needs attention', async () => {
+    mockRepo()
+    await reachCombos()
+    expect(await screen.findByText(/baseline passed/)).toBeInTheDocument()
+    // Collapsed: the editable commands are not reachable until asked for.
+    expect(screen.queryByLabelText('build (optional)')).not.toBeInTheDocument()
+  })
+
+  it('marks optional commands as optional once setup is opened', async () => {
+    mockRepo()
+    const user = await reachCombos()
+    await user.click(await screen.findByText('review'))
+    for (const field of ['install', 'build', 'lint', 'typecheck']) {
+      expect(await screen.findByLabelText(`${field} (optional)`)).toBeInTheDocument()
+    }
+    expect((await screen.findAllByText('leave blank to skip')).length).toBe(4)
+  })
+
+  it('auto-expands setup and blocks starting when there is no test command', async () => {
+    mockRepo({
+      analysis: { ...ANALYSIS, commands: { test: null, test_framework: null } },
+    })
+    await reachCombos()
+
+    // Opened itself — the user did not have to go looking.
+    expect(await screen.findByLabelText('build (optional)')).toBeInTheDocument()
+    expect(await screen.findByText(/no correctness signal without one/)).toBeInTheDocument()
+  })
+
+  it('blocks starting when the baseline could not establish a signal', async () => {
+    mockRepo({ baseline: { ...BASELINE, benchmarkable: false } })
+    await reachCombos()
+    expect(await screen.findByText(/baseline could not establish a signal/)).toBeInTheDocument()
+  })
+
+  it('states the reason rather than showing a dead button', async () => {
+    mockRepo()
+    await reachCombos()
     const start = await screen.findByRole('button', { name: /Start 0 runs/ })
     expect(start).toBeDisabled()
-    // Nothing chosen yet, so no request budget is implied either.
-    expect(await screen.findByText('total runs')).toBeInTheDocument()
-    void user
+    expect(await screen.findByText('pick at least one harness')).toBeInTheDocument()
   })
 
   it('computes the expanded matrix from the selections', async () => {
-    const user = await reachMatrixStep()
+    mockRepo()
+    const user = await reachCombos()
     await user.click(await screen.findByLabelText(/mini-swe-agent/))
     await user.click(screen.getByLabelText(/smolagents/))
     await user.click(await screen.findByLabelText(/gpt-oss-20b/))
 
-    // 2 harnesses x 1 model x 1 task x 1 rep
+    // 2 harnesses × 1 model × 1 task × 1 rep
     expect(await screen.findByRole('button', { name: /Start 2 runs/ })).toBeEnabled()
   })
 
   it('warns when the matrix needs more requests than a free-tier day', async () => {
-    const user = await reachMatrixStep()
+    mockRepo()
+    const user = await reachCombos()
     await user.click(await screen.findByLabelText(/mini-swe-agent/))
     await user.click(await screen.findByLabelText(/gpt-oss-20b/))
 
@@ -84,17 +150,21 @@ describe('NewRun wizard', () => {
     await user.clear(reps)
     await user.type(reps, '9')
 
-    // 1 x 1 x 1 x 9 runs x 8 requests = 72 > ~50/day
+    // 1 × 1 × 1 × 9 runs × 8 requests = 72 > ~50/day
     await waitFor(async () =>
       expect(await screen.findByText(/more than a free-tier day/)).toBeInTheDocument(),
     )
   })
 
-  it('flags that fewer than three repetitions cannot support a reliability claim', async () => {
-    const user = await reachMatrixStep()
-    await user.click(await screen.findByLabelText(/mini-swe-agent/))
-    await user.click(await screen.findByLabelText(/gpt-oss-20b/))
-    expect(await screen.findByText(/statistically weak/)).toBeInTheDocument()
-    void user
+  it('marks the baseline stale after commands are edited', async () => {
+    mockRepo()
+    const user = await reachCombos()
+    await user.click(await screen.findByText('review'))
+    const test = await screen.findByLabelText('test')
+    await user.clear(test)
+    await user.type(test, 'pytest -x')
+    await user.click(screen.getByRole('button', { name: /Save commands/ }))
+
+    expect(await screen.findByText(/Commands changed since this baseline ran/)).toBeInTheDocument()
   })
 })

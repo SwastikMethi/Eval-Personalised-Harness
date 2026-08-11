@@ -135,6 +135,35 @@ def commits(repo_id: str, session: Session = Depends(get_session)) -> list[dict[
     return service.list_commits(root)
 
 
+def _baseline_payload(record: BaselineResult) -> dict[str, Any]:
+    return {
+        "baseline_id": record.id,
+        "base_commit": record.base_commit,
+        "benchmarkable": record.benchmarkable,
+        "warn": record.warn,
+        "steps": {k: {"exit_code": v.get("exit_code")} for k, v in (record.steps or {}).items()},
+        "test_case_count": len(record.test_cases or []),
+    }
+
+
+@router.get("/repositories/{repo_id}/baseline")
+def latest_baseline(repo_id: str, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Most recent baseline for a repo.
+
+    The wizard kicks a baseline off in the background and reviews it later, so
+    it needs to read the outcome without re-running install and the test suite.
+    """
+    _repo_or_404(repo_id, session)
+    record = session.scalars(
+        select(BaselineResult)
+        .where(BaselineResult.repository_id == repo_id)
+        .order_by(BaselineResult.created_at.desc())
+    ).first()
+    if record is None:
+        raise HTTPException(404, "no baseline yet — POST /baseline first")
+    return _baseline_payload(record)
+
+
 @router.post("/repositories/{repo_id}/baseline")
 def run_baseline_endpoint(
     repo_id: str, session: Session = Depends(get_session)
@@ -183,9 +212,5 @@ def run_baseline_endpoint(
     )
     session.add(record)
     session.commit()
-    return {
-        "baseline_id": record.id,
-        "benchmarkable": outcome.benchmarkable,
-        "warn": outcome.warn,
-        "steps": {k: {"exit_code": v["exit_code"]} for k, v in outcome.steps.items()},
-    }
+    # Same shape as GET so the client has one type for both paths.
+    return _baseline_payload(record)

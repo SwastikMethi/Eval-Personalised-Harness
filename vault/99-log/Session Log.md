@@ -137,4 +137,27 @@ Keep entries short: **what changed · why · what it unblocks · what to verify.
 
 ---
 
+## 2026-08-11 — Wizard asks only for what it needs
+
+**Why.** The user hit the Commands step and said *"I don't even know what to put in build and typecheck."* That was the correct reaction: reading the backend confirms **only `test` is load-bearing**. `engine.py` runs build only `if build_cmd := commands.get("build")`; `baseline.py` does `if not cmd: continue` for install/build/lint/typecheck. Blank is the *right* answer for most Python repos, and the UI implied it was an omission. A UI defect, not user error.
+
+**Five steps → three.** Repository → Task → Configure & review.
+- Repository now fires the **baseline in the background** on submit, so it stops being a step. It reads the `RepositoryCommand` row analyze already wrote, so nothing had to move.
+- Task offers **both** modes (the user asked for the choice): a pre-loaded tick-list of recent commits — zero typing, and the strongest signal since real tests shipped with the commit — plus free-text for work not yet in history. Ticking caches sha → task id so re-ticking costs nothing.
+- Configure & review leads with harness/model pickers and the matrix. Detected setup and baseline live in a **collapsed** panel summarised as `python · pytest · baseline passed`, which **opens itself only** when there is no test command or the baseline is not benchmarkable.
+
+**Labelling.** `install`/`build`/`lint`/`typecheck` now read `(optional)` with "leave blank to skip". `test` is the only field that can block, and says why: *"no test command — there is no correctness signal without one."*
+
+**Two UI defects found while testing this.** MUI `Collapse` keeps children mounted, so collapsed form fields stayed tab-focusable while invisible — fixed with `unmountOnExit`. And the Start button showed only the *first* blocker, which makes it feel permanently dead; it now lists every reason.
+
+**Staleness is disclosed.** The auto-baseline runs against *detected* commands. Editing a command marks the result stale and offers a re-run rather than showing an outdated pass.
+
+**Nothing was removed.** Spec §6 still holds — commands remain fully editable, just not in the user's face. Spec §7's warn-and-proceed on a partially failing baseline is preserved; only `benchmarkable: false` blocks, because it genuinely cannot produce a signal.
+
+**Backend.** One addition: `GET /repositories/{id}/baseline` returns the latest result so the review panel can read state without re-running install and the suite. The POST now returns the same shape.
+
+**Verified in a browser** against a real git repo: paste path → land on Task with no commands form → tick a commit → combos step with Setup collapsed and green. Suite 109 backend + 22 frontend; lint, typecheck, build green.
+
+---
+
 <!-- New entries above this line -->

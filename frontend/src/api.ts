@@ -48,9 +48,11 @@ export interface Commit {
 
 export interface BaselineOutcome {
   baseline_id: string
+  base_commit: string
   benchmarkable: boolean
   warn: boolean
   steps: Record<string, { exit_code: number }>
+  test_case_count: number
 }
 
 export interface HiddenTest {
@@ -222,6 +224,8 @@ export const api = {
   updateCommands: (id: string, commands: Record<string, string | null>) =>
     put<{ ok: boolean }>(`/repositories/${id}/commands`, commands),
   baseline: (id: string) => post<BaselineOutcome>(`/repositories/${id}/baseline`),
+  // Read the last baseline without re-running install + the test suite.
+  latestBaseline: (id: string) => get<BaselineOutcome>(`/repositories/${id}/baseline`),
   commits: (id: string) => get<Commit[]>(`/repositories/${id}/commits`),
 
   createTask: (body: { repository_id: string; title: string; prompt: string }) =>
