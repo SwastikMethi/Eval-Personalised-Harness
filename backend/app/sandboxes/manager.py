@@ -31,6 +31,52 @@ log = logging.getLogger(__name__)
 
 RUN_LABEL = "aso.run_id"
 SANDBOX_UID = 1000
+PROXY_PORT = 8005
+
+# A container on an `internal: true` network has no default route AT ALL —
+# not to the internet and not to the host gateway either, so
+# host.docker.internal dies along with egress. Measured, not assumed: the
+# proxy answered 200 before seal() and was unreachable after.
+#
+# So the agent talks to a relay that straddles both networks: it is attached
+# to the run's internal network (where the agent can see it) and to the
+# default bridge (where it can reach the host). The agent still has exactly
+# one reachable destination and no route to the internet.
+RELAY_SCRIPT = f"""
+import socket, threading
+DST = ("host.docker.internal", {PROXY_PORT})
+def pipe(a, b):
+    try:
+        while True:
+            data = a.recv(65536)
+            if not data:
+                break
+            b.sendall(data)
+    except OSError:
+        pass
+    finally:
+        for s in (a, b):
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            s.close()
+def handle(client):
+    try:
+        upstream = socket.create_connection(DST, 10)
+    except OSError:
+        client.close()
+        return
+    threading.Thread(target=pipe, args=(client, upstream), daemon=True).start()
+    threading.Thread(target=pipe, args=(upstream, client), daemon=True).start()
+srv = socket.socket()
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("0.0.0.0", {PROXY_PORT}))
+srv.listen(64)
+while True:
+    conn, _ = srv.accept()
+    threading.Thread(target=handle, args=(conn,), daemon=True).start()
+"""
 
 
 @dataclass
@@ -56,6 +102,7 @@ class SandboxManager:
         self._image = image
         self._containers: dict[str, Any] = {}
         self._networks: dict[str, Any] = {}
+        self._relays: dict[str, Any] = {}
 
     async def create(
         self,
@@ -89,31 +136,72 @@ class SandboxManager:
 
         self._containers[run_id] = await asyncio.to_thread(_create)
 
-    async def seal(self, run_id: str) -> None:
-        """Switch PREP -> AGENT network. Fail-closed: verify egress is dead."""
-        container = self._containers[run_id]
+    def relay_host(self, run_id: str) -> str:
+        """Hostname the sealed agent uses to reach the model proxy."""
+        return f"aso-relay-{run_id[:12]}"
 
-        def _seal() -> None:
+    async def seal(self, run_id: str) -> None:
+        """Switch PREP -> AGENT network.
+
+        Fail-closed both ways: external egress must be dead, AND the model
+        proxy must be reachable. Verifying only the first is how a sealed run
+        silently made zero model requests and still reported success.
+        """
+        container = self._containers[run_id]
+        relay_name = self.relay_host(run_id)
+
+        def _seal() -> Any:
             client = _docker()
             network = client.networks.create(
                 f"aso-internal-{run_id[:12]}", driver="bridge", internal=True,
                 labels={RUN_LABEL: run_id},
             )
+            # Relay first, so it is listening before the agent loses the bridge.
+            relay = client.containers.run(
+                self._image,
+                command=["python3", "-c", RELAY_SCRIPT],
+                detach=True,
+                name=relay_name,
+                labels={RUN_LABEL: run_id},
+                extra_hosts={"host.docker.internal": "host-gateway"},
+                network="bridge",
+                mem_limit="128m",
+                pids_limit=64,
+                security_opt=["no-new-privileges"],
+                cap_drop=["ALL"],
+            )
+            network.connect(relay, aliases=[relay_name])
             bridge = client.networks.get("bridge")
             bridge.disconnect(container)
             network.connect(container)
             self._networks[run_id] = network
+            return relay
 
-        await asyncio.to_thread(_seal)
-        probe = await self.exec(
+        self._relays[run_id] = await asyncio.to_thread(_seal)
+
+        egress = await self.exec(
             run_id,
             "timeout 5 python3 -c \"import socket;socket.create_connection(('1.1.1.1',443),4)\""
             " && echo REACHABLE || echo BLOCKED",
             timeout_s=15,
         )
-        if "BLOCKED" not in probe.stdout:
+        if "BLOCKED" not in egress.stdout:
             await self.cleanup(run_id)
             raise SandboxError(f"seal verification failed for {run_id}: egress still open")
+
+        reachable = await self.exec(
+            run_id,
+            f"timeout 20 python3 -c \"import socket;"
+            f"socket.create_connection(('{relay_name}',{PROXY_PORT}),15)\""
+            " && echo PROXY_OK || echo PROXY_DEAD",
+            timeout_s=30,
+        )
+        if "PROXY_OK" not in reachable.stdout:
+            await self.cleanup(run_id)
+            raise SandboxError(
+                f"seal verification failed for {run_id}: model proxy unreachable via relay "
+                "— the run would make zero model requests and look successful"
+            )
 
     async def exec(
         self, run_id: str, command: str, timeout_s: int = 600, workdir: str = "/workspace"
@@ -171,13 +259,17 @@ class SandboxManager:
     async def cleanup(self, run_id: str) -> None:
         container = self._containers.pop(run_id, None)
         network = self._networks.pop(run_id, None)
+        relay = self._relays.pop(run_id, None)
 
         def _cleanup() -> None:
-            if container is not None:
-                try:
-                    container.remove(force=True)
-                except Exception:  # noqa: BLE001
-                    pass
+            # Containers before the network: a network with endpoints refuses
+            # to be removed and would leak on every run.
+            for target in (container, relay):
+                if target is not None:
+                    try:
+                        target.remove(force=True)
+                    except Exception:  # noqa: BLE001 - already gone is fine
+                        pass
             if network is not None:
                 try:
                     network.remove()

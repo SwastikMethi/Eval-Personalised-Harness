@@ -2,7 +2,6 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 # `make backend` runs uvicorn from backend/, so a bare ".env" resolves to
 # backend/.env and the repo-root .env is silently ignored — the API key simply
 # never arrives. Anchor to this file's location instead of the process CWD.

@@ -7,6 +7,7 @@ The container gets ONLY the per-run proxy token — never the real key.
 Version pinned in sandbox-images/python/Dockerfile.
 """
 
+import base64
 import json
 import shlex
 from collections.abc import AsyncIterator
@@ -17,6 +18,7 @@ from app.harnesses.base import HarnessAdapter, HarnessRunRequest, HarnessRunResu
 from app.sandboxes.manager import SandboxManager
 
 TRAJECTORY_PATH = "/tmp/mini-trajectory.json"
+REGISTRY_PATH = "/tmp/aso_litellm_registry.json"
 
 
 def _now() -> str:
@@ -35,7 +37,11 @@ class MiniSweAgentHarness(HarnessAdapter):
         return [] if docker_available() else ["docker is not available"]
 
     async def prepare(self, request: HarnessRunRequest) -> None:
-        check = await self._manager.exec(request.task_id, "mini --help", timeout_s=60)
+        # Containers are keyed by run_id, not task_id — passing task_id here
+        # raised KeyError during PREPARING, so this harness could never
+        # actually start in a sandbox.
+        run_id = request.metadata["run_id"]
+        check = await self._manager.exec(run_id, "mini --help", timeout_s=60)
         if check.exit_code != 0:
             raise RuntimeError("mini-swe-agent CLI missing in sandbox image")
 
@@ -44,9 +50,38 @@ class MiniSweAgentHarness(HarnessAdapter):
         run_id = request.metadata["run_id"]
         # litellm needs the openai/ prefix to route to an OpenAI-compatible base URL.
         model = f"openai/{request.model_id}"
+
+        # mini re-raises if litellm cannot price the model, which kills the run
+        # after its first successful completion. litellm has no pricing for a
+        # model served through our proxy, so register it explicitly via the
+        # documented LITELLM_MODEL_REGISTRY_PATH hook. Zero is the true cost
+        # for the pinned free variants; the proxy's ModelRequestMetric rows
+        # remain the authoritative spend record either way.
+        registry = json.dumps(
+            {
+                model: {
+                    "input_cost_per_token": 0.0,
+                    "output_cost_per_token": 0.0,
+                    "litellm_provider": "openai",
+                    "mode": "chat",
+                }
+            }
+        )
+        blob = base64.b64encode(registry.encode()).decode()
+        await self._manager.exec(
+            run_id,
+            f"printf %s {shlex.quote(blob)} | base64 -d > {REGISTRY_PATH}",
+            timeout_s=60,
+        )
         cmd = (
             f"OPENAI_API_KEY={shlex.quote(request.run_token)} "
             f"OPENAI_BASE_URL={shlex.quote(request.proxy_base_url + '/v1')} "
+            # Without MSWEA_CONFIGURED the CLI drops into an interactive
+            # first-run wizard asking for a model and API key, which in a
+            # non-tty sandbox just fails. Silent startup keeps the banner out
+            # of the captured output.
+            "MSWEA_CONFIGURED=true MSWEA_SILENT_STARTUP=1 "
+            f"LITELLM_MODEL_REGISTRY_PATH={REGISTRY_PATH} "
             f"mini -y -m {shlex.quote(model)} -t {shlex.quote(request.task_prompt)} "
             f"-o {TRAJECTORY_PATH} --exit-immediately"
         )
@@ -86,7 +121,13 @@ class MiniSweAgentHarness(HarnessAdapter):
             commands_executed=commands,
             error_type=error_type,
             error_message=error_message,
-            raw_metadata={"exit_code": result.exit_code, "truncated": result.truncated},
+            raw_metadata={
+                "exit_code": result.exit_code,
+                "truncated": result.truncated,
+                # Kept even on success: a run that exits 0 having done nothing
+                # is indistinguishable from a good one without it.
+                "stdout_tail": result.stdout[-3000:],
+            },
         )
 
     @staticmethod

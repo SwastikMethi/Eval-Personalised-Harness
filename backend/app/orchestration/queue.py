@@ -54,9 +54,9 @@ DEFAULT_MAX_MODEL_REQUESTS = 8
 # Backoff before a RATE_LIMITED run returns to PENDING. Capped because the
 # limit that matters is daily: retrying sooner just re-spends the quota.
 RATE_LIMIT_BACKOFF_S = (30.0, 120.0, 600.0)
-# Sandboxed harnesses reach the proxy through the host gateway on the port
-# uvicorn actually listens on (Makefile `backend` target and settings agree).
-DOCKER_PROXY_BASE = f"http://host.docker.internal:{settings.backend_port}/proxy"
+# A sealed agent cannot reach host.docker.internal — an `internal: true`
+# network has no route to the host gateway either. It reaches the proxy through
+# a per-run relay that straddles both networks; see SandboxManager.seal().
 
 
 def transition(run: BenchmarkRun, new_state: RunState) -> None:
@@ -276,7 +276,8 @@ class QueueWorker:
                 assert self._sandboxes is not None
                 await self._sandboxes.create(run_id, workspace)
                 await self._sandboxes.seal(run_id)
-                proxy_base = DOCKER_PROXY_BASE
+                relay = self._sandboxes.relay_host(run_id)
+                proxy_base = f"http://{relay}:{settings.backend_port}/proxy"
 
             harness = get_harness(harness_name)
             request = HarnessRunRequest(
@@ -355,6 +356,9 @@ class QueueWorker:
                     "score": evaluation.get("score"),
                     # Quota burn must be visible before it runs out, not after.
                     "usage": usage,
+                    # Harness telemetry (spec §14). Without it a run that exits
+                    # 0 having done nothing looks identical to a good one.
+                    "harness_meta": result.raw_metadata,
                 }
                 self._event(session, run_id, result.status, {"patch_produced": patch_produced})
                 session.commit()
