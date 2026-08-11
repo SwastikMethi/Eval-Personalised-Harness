@@ -174,4 +174,20 @@ Keep entries short: **what changed · why · what it unblocks · what to verify.
 
 ---
 
+## 2026-08-11 — GitHub clone race fixed; AI-assisted setup added
+
+**The bug.** A user's GitHub repo showed no commits. The repo was fine — public, 23 commits, all with parents. `clone_github` destroyed and re-cloned on every call, and backgrounding the baseline (my own change, the previous entry) made that concurrent with the commits query, so one deleted the tree the other was reading. Recorded as [[Known Defects]] #15 — the first defect I caused rather than found. Now clone-once/reuse-after with a per-repo lock; measured 34.8s first clone, **0.4s** on reuse.
+
+**AI-assisted setup.** A "Suggest with AI" button on the review step infers build/test commands and nominates commits worth benchmarking. Deliberate, never automatic: one press costs one of ~50 daily requests, and that budget exists for benchmark runs.
+
+**The security shape matters here.** This is the *only* feature that transmits repository content to a third party — agent sandboxes are sealed and reach nothing but the proxy. So `digest.py` works from an **allowlist** of file types worth sending (README, manifests, CI config), never a blocklist of bad ones, with a second `is_secret()` filter over `.env*`, `*.pem`, `*.key`, `id_rsa*`, `*secret*`. Tests plant a `.env` and an `id_rsa` and assert neither is even *named* in the digest. The button states what it sends before it is pressed.
+
+**The AI never gets the last word.** Suggestions land as editable field values with per-field rationale, are never auto-saved, and mark the baseline stale — so the baseline then proves empirically whether the suggested test command works. Parsing is paranoid: blank commands stay absent rather than being invented, and a hallucinated sha is dropped because it could never be replayed.
+
+**Verified on the user's real repo.** Commits list populates in the UI. The suggestion returned `confidence: low` and its own rationale admitted *"no explicit test suite; however, pytest is a common…"* — correctly flagging a guess. Worth noting for that repo: **no tests means no correctness signal**, so it will produce a failing baseline rather than a benchmark.
+
+**Suite** 133 backend (+21) and 25 frontend (+3); lint, typecheck, build green.
+
+---
+
 <!-- New entries above this line -->

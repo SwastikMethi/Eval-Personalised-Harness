@@ -104,6 +104,108 @@ def test_snapshot_at_parent_excludes_solution(tmp_path: Path) -> None:
     assert not (snapshot / "solution.txt").exists()
 
 
+GH_URL = "https://github.com/owner/repo"
+
+
+def _fake_clone(dest: Path, origin: str) -> None:
+    """A directory that looks exactly like a finished clone of `origin`."""
+    make_git_repo(dest, {"a.txt": "hi"})
+    subprocess.run(["git", "remote", "add", "origin", origin], cwd=dest, check=True)
+
+
+def test_existing_clone_is_reused_not_destroyed(tmp_path: Path, monkeypatch) -> None:
+    """Re-cloning on every call let a background baseline delete the tree a
+    concurrent `git log` was reading, so GitHub repos looked commit-less."""
+    from app.core.config import settings
+    from app.repositories import service
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    dest = tmp_path / "repos" / "repo-1"
+    dest.parent.mkdir(parents=True)
+    _fake_clone(dest, GH_URL)
+    (dest / "sentinel.txt").write_text("must survive")
+
+    # No network: a reused clone must never shell out to `git clone`.
+    monkeypatch.setattr(
+        service, "_do_clone", lambda *a, **k: pytest.fail("re-cloned an existing repo")
+    )
+    assert service.clone_github(GH_URL, "repo-1") == dest
+    assert (dest / "sentinel.txt").read_text() == "must survive"
+
+
+def test_trailing_slash_still_matches_the_existing_clone(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from app.core.config import settings
+    from app.repositories import service
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    dest = tmp_path / "repos" / "repo-2"
+    dest.parent.mkdir(parents=True)
+    _fake_clone(dest, GH_URL)
+    monkeypatch.setattr(
+        service, "_do_clone", lambda *a, **k: pytest.fail("re-cloned on a trailing slash")
+    )
+    assert service.clone_github(f"{GH_URL}/", "repo-2") == dest
+
+
+def test_directory_for_a_different_remote_is_replaced(tmp_path: Path, monkeypatch) -> None:
+    from app.core.config import settings
+    from app.repositories import service
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    dest = tmp_path / "repos" / "repo-3"
+    dest.parent.mkdir(parents=True)
+    _fake_clone(dest, "https://github.com/someone/else")
+
+    called: list[str] = []
+
+    def _fresh(url: str, target: Path) -> Path:
+        called.append(url)
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    monkeypatch.setattr(service, "_do_clone", _fresh)
+    service.clone_github(GH_URL, "repo-3")
+    assert called == [GH_URL], "a clone of the wrong remote must not be reused"
+
+
+def test_concurrent_calls_do_not_race(tmp_path: Path, monkeypatch) -> None:
+    """Two threads asking for the same repo must serialize, not interleave."""
+    import threading as _threading
+
+    from app.core.config import settings
+    from app.repositories import service
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    (tmp_path / "repos").mkdir(parents=True)
+    overlaps: list[int] = []
+    inside = 0
+
+    def _slow(url: str, target: Path) -> Path:
+        nonlocal inside
+        inside += 1
+        overlaps.append(inside)
+        import time
+
+        time.sleep(0.05)
+        inside -= 1
+        target.mkdir(parents=True, exist_ok=True)
+        _fake_clone(target, url) if not (target / ".git").exists() else None
+        return target
+
+    monkeypatch.setattr(service, "_do_clone", _slow)
+    threads = [
+        _threading.Thread(target=service.clone_github, args=(GH_URL, "repo-4")) for _ in range(2)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert max(overlaps) == 1, "clones of the same repo overlapped"
+
+
 def test_list_commits_includes_parent(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     make_git_repo(repo, {"a.txt": "1"})

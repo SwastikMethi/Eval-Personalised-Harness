@@ -7,11 +7,23 @@ boundary starts here.
 
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 from app.core.config import settings
 
 MAX_REPO_BYTES = 500 * 1024 * 1024
+
+# One lock per repository id. FastAPI runs sync endpoints in a threadpool, so
+# two requests for the same repo really do run concurrently — and cloning is
+# destructive, so they must not interleave.
+_clone_locks: dict[str, threading.Lock] = {}
+_clone_locks_guard = threading.Lock()
+
+
+def _lock_for(repo_id: str) -> threading.Lock:
+    with _clone_locks_guard:
+        return _clone_locks.setdefault(repo_id, threading.Lock())
 
 
 class RepositoryError(Exception):
@@ -54,13 +66,48 @@ def register_local(path_str: str) -> Path:
     return path
 
 
+def _origin_of(root: Path) -> str | None:
+    """Remote URL of an existing clone, or None if it is not a usable repo."""
+    if not (root / ".git").exists():
+        return None
+    proc = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
 def clone_github(url: str, repo_id: str) -> Path:
+    """Clone once, then reuse.
+
+    This used to `rmtree` and re-clone on EVERY call, which had two problems.
+    Concurrently — the wizard runs a background baseline while listing commits
+    — one call deleted the working tree the other was reading, so GitHub repos
+    appeared to have no commits. And re-fetching silently moves history under a
+    running experiment, when a benchmark should measure a fixed snapshot.
+
+    An existing clone of the same remote is therefore returned untouched; a
+    directory that is not a usable clone of that remote is replaced.
+    """
     if not url.startswith("https://github.com/"):
         raise RepositoryError("only public https://github.com URLs are supported")
     dest = settings.data_dir.resolve() / "repos" / repo_id
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists():
-        shutil.rmtree(dest)
+
+    with _lock_for(repo_id):
+        if dest.exists():
+            origin = _origin_of(dest)
+            if origin is not None and origin.rstrip("/") == url.rstrip("/"):
+                return dest
+            # Wrong remote, or a half-written directory from a failed clone.
+            shutil.rmtree(dest, ignore_errors=True)
+        return _do_clone(url, dest)
+
+
+def _do_clone(url: str, dest: Path) -> Path:
     proc = subprocess.run(
         ["git", "clone", "--no-recurse-submodules", url, str(dest)],
         capture_output=True,

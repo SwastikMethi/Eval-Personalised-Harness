@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db.engine import get_session
 from app.models import BaselineResult, Repository, RepositoryAnalysis, RepositoryCommand
+from app.providers.openrouter import ProviderError
 from app.repositories import baseline, detectors, service
 
 router = APIRouter()
@@ -133,6 +134,83 @@ def commits(repo_id: str, session: Session = Depends(get_session)) -> list[dict[
     repo = _repo_or_404(repo_id, session)
     root = _repo_root(repo)
     return service.list_commits(root)
+
+
+class SuggestIn(BaseModel):
+    model_id: str | None = None
+
+
+@router.post("/repositories/{repo_id}/suggest")
+async def suggest_setup_endpoint(
+    repo_id: str, body: SuggestIn | None = None, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    """Infer build/test commands and nominate benchmark commits (spec §6).
+
+    Sends a bounded, secret-free digest of the repository to the model provider
+    — the only place in this product that transmits repository content
+    anywhere. The result is a SUGGESTION: it is returned for the user to edit
+    and save, never applied, and the baseline verifies it afterwards.
+
+    Runs server-side rather than through the run-scoped proxy: there is no run
+    here, and the API key must not leave the backend either way.
+    """
+    from app.core.config import settings as cfg
+    from app.providers.openrouter import OpenRouterProvider
+    from app.repositories import digest as digest_mod
+    from app.repositories import suggest as suggest_mod
+
+    if not cfg.openrouter_api_key:
+        raise HTTPException(409, "OPENROUTER_API_KEY not configured — set it in .env")
+
+    repo = _repo_or_404(repo_id, session)
+    root = _repo_root(repo)
+    try:
+        commits = service.list_commits(root, limit=digest_mod.MAX_COMMITS)
+    except service.RepositoryError:
+        commits = []
+
+    bundle = digest_mod.build_digest(root, commits)
+    detected = detectors.analyze_repository(root)
+    hint = {
+        "languages": detected.languages,
+        "package_managers": detected.package_managers,
+        "commands": {
+            f: getattr(detected.commands, f, None)
+            for f in ("install", "build", "test", "lint", "typecheck", "test_framework")
+        },
+    }
+
+    provider = OpenRouterProvider(
+        api_key=cfg.openrouter_api_key,
+        base_url=cfg.openrouter_base_url,
+        http_referer=cfg.openrouter_http_referer,
+        app_name=cfg.openrouter_app_name,
+    )
+    model_id = (body.model_id if body else None) or cfg.suggest_model
+    try:
+        suggestion = await suggest_mod.suggest_setup(provider, model_id, bundle, hint)
+    except suggest_mod.SuggestionError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except ProviderError as exc:
+        raise HTTPException(502, f"[{exc.category}] {exc}") from exc
+
+    by_sha = {c["sha"]: c for c in commits}
+    return {
+        "model_id": suggestion.model_id,
+        "confidence": suggestion.confidence,
+        "commands": {**suggestion.commands, "test_framework": suggestion.test_framework},
+        "rationale": suggestion.rationale,
+        "commits": [
+            {
+                "sha": c["sha"],
+                "why": c["why"],
+                "subject": by_sha.get(c["sha"], {}).get("subject", ""),
+                "parent": by_sha.get(c["sha"], {}).get("parent", ""),
+            }
+            for c in suggestion.commits
+        ],
+        "files_read": sorted(bundle.files),
+    }
 
 
 def _baseline_payload(record: BaselineResult) -> dict[str, Any]:

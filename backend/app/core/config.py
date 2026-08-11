@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     openrouter_http_referer: str = "http://localhost:3000"
     openrouter_app_name: str = "Agent Stack Optimizer"
 
+    # Model used for AI-assisted setup suggestions (one request per press).
+    # A code-oriented free model; overridable per request from the UI.
+    suggest_model: str = "cohere/north-mini-code:free"
     backend_port: int = 8005
     data_dir: Path = Path("../data")
     database_url: str = "sqlite:///../data/aso.db"

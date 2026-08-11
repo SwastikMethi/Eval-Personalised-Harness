@@ -156,6 +156,70 @@ describe('NewRun wizard', () => {
     )
   })
 
+  it('surfaces a clone failure instead of claiming there are no commits', async () => {
+    // A failed GitHub clone used to render identically to "no commits found",
+    // which is what made a perfectly good repo look empty.
+    server.use(
+      http.post('/api/v1/repositories', () => HttpResponse.json({ id: 'r1' })),
+      http.post('/api/v1/repositories/:id/analyze', () =>
+        HttpResponse.json({ analysis_id: 'a1', supported: true }),
+      ),
+      http.get('/api/v1/repositories/:id/analysis', () => HttpResponse.json(ANALYSIS)),
+      http.post('/api/v1/repositories/:id/baseline', () => HttpResponse.json(BASELINE)),
+      http.get('/api/v1/repositories/:id/commits', () =>
+        HttpResponse.json({ detail: 'clone failed: repository not found' }, { status: 422 }),
+      ),
+    )
+    const user = userEvent.setup()
+    renderScreen(<NewRun />)
+    await user.type(screen.getByPlaceholderText(/Projects\/your-repo/), '/tmp/repo')
+    await user.click(screen.getByRole('button', { name: /Analyze repository/ }))
+
+    expect(await screen.findByText(/Could not read commits/)).toBeInTheDocument()
+    expect(screen.queryByText(/No commits with a parent found/)).not.toBeInTheDocument()
+  })
+
+  it('fills commands from an AI suggestion without saving them', async () => {
+    mockRepo()
+    server.use(
+      http.post('/api/v1/repositories/:id/suggest', () =>
+        HttpResponse.json({
+          model_id: 'cohere/north-mini-code:free',
+          confidence: 'high',
+          commands: {
+            install: 'pip install -e .',
+            build: null,
+            test: 'pytest -q',
+            lint: 'ruff check .',
+            typecheck: null,
+            test_framework: 'pytest',
+          },
+          rationale: { test: 'pyproject.toml configures pytest' },
+          commits: [{ sha: 'aaaaaaaa1111', why: 'fixes a bug and adds a test', subject: 'Fix median', parent: 'p1' }],
+          files_read: ['pyproject.toml', 'README.md'],
+        }),
+      ),
+    )
+    const user = await reachCombos()
+    await user.click(await screen.findByText('review'))
+    await user.click(screen.getByRole('button', { name: /Suggest with AI/ }))
+
+    expect(await screen.findByDisplayValue('pip install -e .')).toBeInTheDocument()
+    expect(await screen.findByDisplayValue('ruff check .')).toBeInTheDocument()
+    // Provenance shown, and the rationale replaces the generic helper text.
+    expect(await screen.findByText(/AI: pyproject.toml configures pytest/)).toBeInTheDocument()
+    // Suggestions are unverified until the baseline re-runs against them.
+    expect(await screen.findByText(/Commands changed since this baseline ran/)).toBeInTheDocument()
+  })
+
+  it('discloses what the AI button transmits before it is pressed', async () => {
+    mockRepo()
+    const user = await reachCombos()
+    await user.click(await screen.findByText('review'))
+    expect(await screen.findByText(/sends file names, README, manifests/)).toBeInTheDocument()
+    expect(await screen.findByText(/secrets \(.env, keys\) are never included/)).toBeInTheDocument()
+  })
+
   it('marks the baseline stale after commands are edited', async () => {
     mockRepo()
     const user = await reachCombos()

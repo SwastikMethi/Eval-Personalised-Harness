@@ -153,6 +153,25 @@ export default function NewRun() {
     onError: fail,
   })
 
+  /** One request per press. Fills the fields as editable suggestions — never
+   *  saved, never applied silently; the baseline then verifies them. */
+  const askAi = useMutation({
+    mutationFn: () => api.suggest(repoId!),
+    onSuccess: (s) => {
+      const next = { ...commands }
+      for (const f of [...REQUIRED_COMMANDS, ...OPTIONAL_COMMANDS]) {
+        next[f] = s.commands[f] ?? ''
+      }
+      setCommands(next)
+      if (s.commands.test_framework) setFramework(s.commands.test_framework)
+      setSetupOpen(true)
+      setBaselineStale(true)
+      setError(null)
+    },
+    onError: fail,
+  })
+  const suggestion = askAi.data
+
   const describeTask = useMutation({
     mutationFn: () => api.createTask({ repository_id: repoId!, title, prompt }),
     onSuccess: ({ id }) => {
@@ -333,6 +352,14 @@ export default function NewRun() {
                     the strongest signal available, because the real tests shipped with the commit.
                   </Typography>
                   {commits.isLoading && <CircularProgress size={16} />}
+                  {/* Without this a failed clone renders as "no commits", which
+                      is what made a perfectly good GitHub repo look empty. */}
+                  {commits.isError && (
+                    <Alert severity="error" sx={{ mb: 2 }}>
+                      Could not read commits:{' '}
+                      {commits.error instanceof Error ? commits.error.message : 'unknown error'}
+                    </Alert>
+                  )}
                   <Box sx={{ maxHeight: 380, overflowY: 'auto' }}>
                     {(commits.data ?? [])
                       .filter((c: Commit) => c.parent)
@@ -367,7 +394,7 @@ export default function NewRun() {
                         />
                       ))}
                   </Box>
-                  {!commits.isLoading && (commits.data ?? []).length === 0 && (
+                  {!commits.isLoading && !commits.isError && (commits.data ?? []).length === 0 && (
                     <Empty>No commits with a parent found — describe a task instead.</Empty>
                   )}
                 </>
@@ -694,6 +721,34 @@ export default function NewRun() {
                 <Divider sx={{ my: 2 }} />
 
                 <Typography variant="overline">commands</Typography>
+                <Box sx={{ mb: 1.5 }}>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    disabled={askAi.isPending || !repoId}
+                    onClick={() => askAi.mutate()}
+                    startIcon={askAi.isPending ? <CircularProgress size={12} /> : null}
+                  >
+                    {askAi.isPending ? 'Analyzing repo…' : 'Suggest with AI'}
+                  </Button>
+                  {/* This is the only feature that transmits repo content
+                      anywhere — say so before it is pressed, not after. */}
+                  <Typography
+                    sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.faint, mt: 0.75 }}
+                  >
+                    sends file names, README, manifests and CI config to OpenRouter · costs 1 of
+                    ~50 daily requests · secrets (.env, keys) are never included
+                  </Typography>
+                  {suggestion && (
+                    <Typography
+                      sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.dim, mt: 0.75 }}
+                    >
+                      suggested by {suggestion.model_id} · confidence {suggestion.confidence} ·
+                      read {suggestion.files_read.length} file
+                      {suggestion.files_read.length === 1 ? '' : 's'} · review and save below
+                    </Typography>
+                  )}
+                </Box>
                 <TextField
                   fullWidth
                   label="test"
@@ -701,9 +756,11 @@ export default function NewRun() {
                   onChange={(e) => setCommands({ ...commands, test: e.target.value })}
                   error={!testCommand}
                   helperText={
-                    testCommand
-                      ? 'how the evaluator runs your tests'
-                      : 'required — without it there is no correctness signal'
+                    suggestion?.rationale?.test
+                      ? `AI: ${suggestion.rationale.test}`
+                      : testCommand
+                        ? 'how the evaluator runs your tests'
+                        : 'required — without it there is no correctness signal'
                   }
                   sx={{ mb: 2, mt: 1 }}
                 />
@@ -714,7 +771,11 @@ export default function NewRun() {
                     label={`${field} (optional)`}
                     value={commands[field] ?? ''}
                     onChange={(e) => setCommands({ ...commands, [field]: e.target.value })}
-                    helperText="leave blank to skip"
+                    helperText={
+                      suggestion?.rationale?.[field]
+                        ? `AI: ${suggestion.rationale[field]}`
+                        : 'leave blank to skip'
+                    }
                     sx={{ mb: 1.5 }}
                   />
                 ))}
@@ -735,6 +796,52 @@ export default function NewRun() {
                 >
                   Save commands
                 </Button>
+
+                {suggestion && suggestion.commits.length > 0 && (
+                  <>
+                    <Divider sx={{ my: 2 }} />
+                    <Typography variant="overline">suggested commits to benchmark</Typography>
+                    <Typography sx={{ color: C.dim, fontSize: '0.78rem', mb: 1.5 }}>
+                      Commits that fix behaviour and touch tests grade best. Add them here without
+                      going back a step.
+                    </Typography>
+                    {suggestion.commits.map((c) => {
+                      const added = selectedShas.includes(c.sha)
+                      return (
+                        <Box
+                          key={c.sha}
+                          sx={{
+                            display: 'flex',
+                            alignItems: 'flex-start',
+                            justifyContent: 'space-between',
+                            gap: 1,
+                            py: 1,
+                            borderBottom: `1px solid ${C.lineSoft}`,
+                          }}
+                        >
+                          <Box sx={{ minWidth: 0 }}>
+                            <Mono size="0.74rem" color={C.text}>
+                              {c.subject || c.sha.slice(0, 8)}
+                            </Mono>
+                            <Typography
+                              sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.faint }}
+                            >
+                              {c.sha.slice(0, 8)} · {c.why}
+                            </Typography>
+                          </Box>
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            disabled={added || pickCommit.isPending}
+                            onClick={() => pickCommit.mutate(c.sha)}
+                          >
+                            {added ? 'added' : 'add as task'}
+                          </Button>
+                        </Box>
+                      )
+                    })}
+                  </>
+                )}
 
                 <Divider sx={{ my: 2 }} />
                 <Typography variant="overline">baseline</Typography>

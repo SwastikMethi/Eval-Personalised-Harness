@@ -66,6 +66,15 @@ export interface HiddenTest {
   approved: boolean | null
 }
 
+export interface Suggestion {
+  model_id: string
+  confidence: 'high' | 'low'
+  commands: Record<string, string | null>
+  rationale: Record<string, string>
+  commits: { sha: string; why: string; subject: string; parent: string }[]
+  files_read: string[]
+}
+
 export interface MatrixPreview {
   combinations: number
   runs: number
@@ -228,6 +237,9 @@ export const api = {
   baseline: (id: string) => post<BaselineOutcome>(`/repositories/${id}/baseline`),
   // Read the last baseline without re-running install + the test suite.
   latestBaseline: (id: string) => get<BaselineOutcome>(`/repositories/${id}/baseline`),
+  // Sends a bounded, secret-free repo digest to the model provider. One
+  // request per call — deliberate, never automatic.
+  suggest: (id: string) => post<Suggestion>(`/repositories/${id}/suggest`),
   commits: (id: string) => get<Commit[]>(`/repositories/${id}/commits`),
 
   createTask: (body: { repository_id: string; title: string; prompt: string }) =>

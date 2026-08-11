@@ -8,7 +8,19 @@ updated: 2026-08-11
 
 Defects found by reading code on 2026-08-11. **Each one blocks a real benchmark run.** Index: [[00 Index]].
 
-**Status: all 14 fixed.** #1–#3 Phase 2 · #4–#6 Phase 3 · #7–#8 Phase 1 · #9 Phase 3 · **#10–#14 found by attempting the first real model run**. Kept as a record of what was wrong and what guards it now.
+## 15. GitHub clones raced themselves ✅ FIXED (2026-08-11)
+
+**The first defect caused by my own change.** `clone_github` did `shutil.rmtree(dest)` and re-cloned on *every* call, and `_repo_root()` calls it for every GitHub-sourced request. Backgrounding the baseline (wizard rework) meant the baseline and the commits query ran concurrently — so one deleted the working tree the other was running `git log` inside, and a perfectly good GitHub repo reported **zero commits**. Local repos were immune because `register_local` only validates a path.
+
+Re-cloning was also wrong on its own terms: silently re-fetching moves history under a running experiment when a benchmark should measure a fixed snapshot.
+
+Now clone-once/reuse-after, keyed on a matching `origin`, serialized by a per-repo lock. Measured after the fix: first analyze 34.8s (clone), subsequent commits **0.4s** (reuse).
+
+Compounded by a UI defect: `commits.isError` was never rendered, so a failed clone looked identical to "this repo has no commits". Both now covered by tests.
+
+---
+
+**Status: all 15 fixed.** #1–#3 Phase 2 · #4–#6 Phase 3 · #7–#8 Phase 1 · #9 Phase 3 · **#10–#14 found by attempting the first real model run**. Kept as a record of what was wrong and what guards it now.
 
 > Defects #10–#14 are the important ones: each alone made a sandboxed benchmark impossible, and none was visible from the test suite, because nothing had ever executed a real run.
 
