@@ -31,6 +31,21 @@ class Settings(BaseSettings):
     # abandon — that spends the same upstream quota and returns nothing.
     provider_timeout_seconds: float = 600.0
 
+    # Setup-time analysis providers. Deciding how a repo can be evaluated is a
+    # judgement made once per repository, and getting it wrong is invisible
+    # until a run returns INSUFFICIENT_EVALUATION_SIGNAL — worth a capable
+    # model. These are not restricted to analysis; a combination may benchmark
+    # them too.
+    anthropic_api_key: str = ""
+    anthropic_base_url: str = "https://api.anthropic.com/v1"
+    openai_api_key: str = ""
+    openai_base_url: str = "https://api.openai.com/v1"
+
+    # Which provider analyses repositories. "auto" picks the first configured
+    # key in order of preference rather than failing when one is absent.
+    analyzer_provider: str = "auto"
+    analyzer_model: str = ""
+
     # Model used for AI-assisted setup suggestions (one request per press).
     # A code-oriented free model; overridable per request from the UI.
     suggest_model: str = "cohere/north-mini-code:free"

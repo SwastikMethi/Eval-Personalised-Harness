@@ -58,6 +58,24 @@ def _install_provider() -> str:
         (register_provider if installed else set_provider)(nim)
         installed.append("nvidia")
 
+    if settings.anthropic_api_key:
+        from app.providers.anthropic import AnthropicProvider
+
+        anthropic = AnthropicProvider(
+            api_key=settings.anthropic_api_key, base_url=settings.anthropic_base_url
+        )
+        (register_provider if installed else set_provider)(anthropic)
+        installed.append("anthropic")
+
+    if settings.openai_api_key:
+        from app.providers.openai_api import OpenAIProvider
+
+        openai = OpenAIProvider(
+            api_key=settings.openai_api_key, base_url=settings.openai_base_url
+        )
+        (register_provider if installed else set_provider)(openai)
+        installed.append("openai")
+
     return "+".join(installed) or "fake"
 
 

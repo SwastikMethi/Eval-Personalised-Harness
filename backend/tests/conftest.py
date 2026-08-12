@@ -24,6 +24,8 @@ os.environ["DATA_DIR"] = _tmp
 # a future provider is missed.
 os.environ["OPENROUTER_API_KEY"] = ""
 os.environ["NVIDIA_API_KEY"] = ""
+os.environ["ANTHROPIC_API_KEY"] = ""
+os.environ["OPENAI_API_KEY"] = ""
 
 
 @pytest.fixture(scope="session", autouse=True)
