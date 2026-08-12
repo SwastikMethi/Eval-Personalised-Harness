@@ -16,7 +16,10 @@ from app.sandboxes.exec import CommandResult
 from app.sandboxes.manager import container_kwargs, docker_available
 from app.sandboxes.prepared import image_tag, manifest_files, manifest_hash
 
-pytestmark = pytest.mark.skipif(not docker_available(), reason="docker unavailable")
+pytestmark = [
+    pytest.mark.docker,
+    pytest.mark.skipif(not docker_available(), reason="docker unavailable"),
+]
 
 IMAGE = "aso-sandbox-python:dev"
 

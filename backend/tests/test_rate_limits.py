@@ -227,6 +227,92 @@ def test_rate_limited_run_is_parked_with_a_backoff_then_released() -> None:
         assert run.retry_after is None  # type: ignore[union-attr]
 
 
+class FailingProvider(ModelProvider):
+    """Answers with a retryable upstream 5xx, as NIM's gateway did at 302s."""
+
+    name = "failing"
+
+    async def list_models(self) -> list[ModelInfo]:
+        return []
+
+    async def validate_model(self, model_id: str) -> ModelInfo:
+        raise NotImplementedError
+
+    async def test_connection(self) -> dict[str, Any]:
+        return {"ok": False}
+
+    async def complete(
+        self, model_id: str, messages: list[dict[str, Any]], **kwargs: Any
+    ) -> CompletionResult:
+        raise ProviderError(
+            "provider error (504): ", ErrorCategory.MODEL_PROVIDER, retryable=True, status=504
+        )
+
+
+async def test_upstream_5xx_is_remembered_on_the_run_token(restore_provider: None) -> None:
+    """The orchestrator must be able to tell 'the provider blew up' from 'the
+    harness broke' without parsing harness error strings — the same contract
+    rate_limited already had. Without this a 504 died as a harness crash."""
+    proxy.set_provider(FailingProvider())
+    token = proxy.issue_run_token("pe-run", MODEL, max_requests=5)
+    body = proxy.ChatRequest(model=MODEL, messages=[{"role": "user", "content": "hi"}])
+
+    with pytest.raises(Exception) as exc:
+        await proxy.chat_completions(body, authorization=f"Bearer {token}")
+    assert getattr(exc.value, "status_code", None) == 502
+
+    usage = proxy.run_usage("pe-run")
+    assert usage["provider_error"] is True
+    assert usage["rate_limited"] is False, "a 5xx is not throttling"
+    assert "504" in usage["provider_error_detail"]
+    proxy.revoke_run_token("pe-run")
+
+
+def test_provider_failure_is_parked_then_gives_up_as_provider_not_harness() -> None:
+    """Retried a bounded number of times, because a model slower than the
+    provider's gateway fails identically every attempt at ~5 minutes a go."""
+    from app.orchestration.queue import PROVIDER_ERROR_MAX_ATTEMPTS
+
+    worker = QueueWorker(SessionLocal, proxy_base_url="http://test/proxy")
+    run_id = _make_run(RunState.RUNNING)
+    usage = {"requests": 1, "succeeded": 0, "provider_error": True}
+
+    for _ in range(PROVIDER_ERROR_MAX_ATTEMPTS):
+        assert worker._park_for_retry(
+            run_id, usage, "provider_error", ErrorCategory.MODEL_PROVIDER,
+            "provider failed", max_attempts=PROVIDER_ERROR_MAX_ATTEMPTS,
+        )
+        with SessionLocal() as session:
+            run = session.get(BenchmarkRun, run_id)
+            assert run is not None
+            assert RunState(run.state) is RunState.RATE_LIMITED
+            assert run.error_category == ErrorCategory.MODEL_PROVIDER
+            run.state = RunState.RUNNING  # re-arm, as the release path would
+            session.commit()
+
+    # Cap reached: the caller must fail it terminally rather than loop forever.
+    assert not worker._park_for_retry(
+        run_id, usage, "provider_error", ErrorCategory.MODEL_PROVIDER,
+        "provider failed", max_attempts=PROVIDER_ERROR_MAX_ATTEMPTS,
+    )
+
+
+def test_throttling_is_still_uncapped() -> None:
+    """Waiting out a daily quota is correct; only upstream 5xx is capped."""
+    worker = QueueWorker(SessionLocal, proxy_base_url="http://test/proxy")
+    run_id = _make_run(RunState.RUNNING)
+
+    for _ in range(5):
+        assert worker._park_for_retry(
+            run_id, {"rate_limited": True}, "rate_limited",
+            ErrorCategory.RATE_LIMITED, "throttled",
+        )
+        with SessionLocal() as session:
+            run = session.get(BenchmarkRun, run_id)
+            run.state = RunState.RUNNING  # type: ignore[union-attr]
+            session.commit()
+
+
 def test_slow_provider_reads_as_timeout_not_a_broken_harness() -> None:
     """Requests all succeeded upstream but the harness got no output — the
     client gave up on a slow provider. Execution efficiency is 15% of the
@@ -271,6 +357,10 @@ def test_a_completed_run_that_never_reached_the_model_is_not_success() -> None:
     # A patch is proof of work even if the step count is unreported.
     patched = SimpleNamespace(status="completed", agent_steps=0, patch="diff --git a b")
     assert not worker._did_no_work(patched, {"requests": 0, "succeeded": 0})
+    # An unreadable trajectory reports None. That is absence of evidence, not
+    # evidence of absence — it must not condemn a run that actually worked.
+    unknown = SimpleNamespace(status="completed", agent_steps=None, patch=None)
+    assert not worker._did_no_work(unknown, {"requests": 1, "succeeded": 1})
 
 
 def test_unreachable_proxy_is_not_reported_as_a_slow_provider() -> None:

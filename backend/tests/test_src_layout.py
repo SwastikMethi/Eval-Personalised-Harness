@@ -18,7 +18,10 @@ import pytest
 
 from app.sandboxes.manager import docker_available
 
-pytestmark = pytest.mark.skipif(not docker_available(), reason="docker unavailable")
+pytestmark = [
+    pytest.mark.docker,
+    pytest.mark.skipif(not docker_available(), reason="docker unavailable"),
+]
 
 IMAGE = "aso-sandbox-python:dev"
 
@@ -33,7 +36,7 @@ def _image_present() -> bool:
 
 
 pytestmark = [
-    pytestmark,
+    *pytestmark,
     pytest.mark.skipif(not _image_present(), reason=f"{IMAGE} not built"),
 ]
 

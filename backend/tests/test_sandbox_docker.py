@@ -13,7 +13,10 @@ import pytest
 
 from app.sandboxes.manager import PROXY_PORT, RUN_LABEL, SandboxManager, docker_available
 
-pytestmark = pytest.mark.skipif(not docker_available(), reason="docker unavailable")
+pytestmark = [
+    pytest.mark.docker,
+    pytest.mark.skipif(not docker_available(), reason="docker unavailable"),
+]
 
 IMAGE = "python:3.12-slim"  # sealing tests don't need the harness image
 

@@ -55,6 +55,10 @@ DEFAULT_MAX_MODEL_REQUESTS = 8
 # Backoff before a RATE_LIMITED run returns to PENDING. Capped because the
 # limit that matters is daily: retrying sooner just re-spends the quota.
 RATE_LIMIT_BACKOFF_S = (30.0, 120.0, 600.0)
+# Throttling is worth waiting out indefinitely; an upstream 5xx is not. A model
+# slower than the provider's gateway fails the same way every time, and each
+# attempt cost ~5 minutes and real credits when measured on NIM.
+PROVIDER_ERROR_MAX_ATTEMPTS = 2
 # A sealed agent cannot reach host.docker.internal — an `internal: true`
 # network has no route to the host gateway either. It reaches the proxy through
 # a per-run relay that straddles both networks; see SandboxManager.seal().
@@ -354,6 +358,29 @@ class QueueWorker:
                 self._rate_limit(run_id, usage)
                 return
 
+            # Neither is an upstream 5xx. Measured: z-ai/glm-5.2 on NIM returned
+            # 504 after 302s because the provider's own gateway gave up while
+            # the model was still generating — nothing the harness did. Parked
+            # here, while the run is still RUNNING, because RATE_LIMITED is not
+            # reachable from EVALUATING.
+            provider_error_exhausted = False
+            if (
+                usage.get("provider_error")
+                and result.status != "completed"
+                and not (usage.get("succeeded") or 0)
+            ):
+                detail = usage.get("provider_error_detail") or "upstream error"
+                if self._park_for_retry(
+                    run_id,
+                    usage,
+                    event_type="provider_error",
+                    category=ErrorCategory.MODEL_PROVIDER,
+                    message=f"provider failed ({detail}); queued for retry",
+                    max_attempts=PROVIDER_ERROR_MAX_ATTEMPTS,
+                ):
+                    return
+                provider_error_exhausted = True
+
             with self._sessions() as session:
                 run = session.get(BenchmarkRun, run_id)
                 assert run is not None
@@ -391,6 +418,19 @@ class QueueWorker:
                 elif result.status == "timeout":
                     transition(run, RunState.TIMED_OUT)
                     run.error_category = ErrorCategory.TIMEOUT
+                elif provider_error_exhausted:
+                    # Retried to the cap and still failing: report the provider,
+                    # not the harness, so the result reads as "this model is
+                    # unusable on this provider" rather than "something broke".
+                    transition(run, RunState.FAILED)
+                    run.error_category = ErrorCategory.MODEL_PROVIDER
+                    run.error_message = (
+                        "provider failed on every attempt "
+                        f"({usage.get('provider_error_detail') or 'upstream error'}) after "
+                        f"{PROVIDER_ERROR_MAX_ATTEMPTS} retries — the model likely exceeds "
+                        "the provider's own gateway timeout. "
+                        + (result.error_message or "")[:800]
+                    )
                 elif self._looks_like_provider_timeout(result, usage):
                     # Every request succeeded upstream, yet the harness reported
                     # a generation failure: the provider was slower than the
@@ -503,27 +543,55 @@ class QueueWorker:
 
     def _rate_limit(self, run_id: str, usage: dict[str, Any]) -> None:
         """RUNNING → RATE_LIMITED with a persisted backoff deadline."""
+        self._park_for_retry(
+            run_id,
+            usage,
+            event_type="rate_limited",
+            category=ErrorCategory.RATE_LIMITED,
+            message="provider rate limited; queued for retry",
+        )
+
+    def _park_for_retry(
+        self,
+        run_id: str,
+        usage: dict[str, Any],
+        event_type: str,
+        category: str,
+        message: str,
+        max_attempts: int | None = None,
+    ) -> bool:
+        """RUNNING → RATE_LIMITED with a persisted backoff deadline.
+
+        Returns False when the attempt cap is reached, so the caller can fail
+        the run terminally instead. Throttling is uncapped — waiting is the
+        correct response to a daily quota — but an upstream 5xx can be
+        deterministic (a model slower than the provider's own gateway), and
+        retrying that forever costs minutes and credits per attempt.
+        """
         with self._sessions() as session:
             run = session.get(BenchmarkRun, run_id)
             if run is None or RunState(run.state) is not RunState.RUNNING:
-                return
+                return True
             attempts = session.scalars(
                 select(RunEvent).where(
-                    RunEvent.run_id == run_id, RunEvent.event_type == "rate_limited"
+                    RunEvent.run_id == run_id, RunEvent.event_type == event_type
                 )
             ).all()
+            if max_attempts is not None and len(attempts) >= max_attempts:
+                return False
             delay = RATE_LIMIT_BACKOFF_S[min(len(attempts), len(RATE_LIMIT_BACKOFF_S) - 1)]
             transition(run, RunState.RATE_LIMITED)
-            run.error_category = ErrorCategory.RATE_LIMITED
-            run.error_message = "provider rate limited; queued for retry"
+            run.error_category = category
+            run.error_message = message
             run.retry_after = datetime.now(UTC) + timedelta(seconds=delay)
             run.result = {**(run.result or {}), "usage": usage}
-            self._event(session, run_id, "rate_limited", {"retry_in_s": delay, **usage})
+            self._event(session, run_id, event_type, {"retry_in_s": delay, **usage})
             session.commit()
         log.info(
-            "run rate limited",
-            extra={"run_id": run_id, "event_type": "rate_limited", "duration": delay},
+            "run parked for retry",
+            extra={"run_id": run_id, "event_type": event_type, "duration": delay},
         )
+        return True
 
     def _release_rate_limited(self) -> None:
         """RATE_LIMITED → PENDING once the backoff has elapsed."""
@@ -569,12 +637,18 @@ class QueueWorker:
         legitimate benchmark result, so a run that genuinely tried and failed
         to solve the task still counts as completed — this only catches the
         case where the model was never reached at all.
+
+        `agent_steps is None` means the harness could not report a count, which
+        is not evidence of doing nothing: an unreadable trajectory must not be
+        able to condemn a run that actually worked.
         """
         if usage.get("requests") and (usage.get("succeeded") or 0) > 0:
             return False
         if result.patch and result.patch.strip():
             return False
-        return not (result.agent_steps or 0)
+        if result.agent_steps is None:
+            return False
+        return not result.agent_steps
 
     @staticmethod
     def _looks_like_provider_timeout(result: Any, usage: dict[str, Any]) -> bool:

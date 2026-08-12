@@ -9,6 +9,7 @@ Version pinned in sandbox-images/python/Dockerfile.
 
 import base64
 import json
+import logging
 import shlex
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -16,6 +17,8 @@ from typing import Any
 
 from app.harnesses.base import HarnessAdapter, HarnessRunRequest, HarnessRunResult
 from app.sandboxes.manager import SandboxManager
+
+log = logging.getLogger(__name__)
 
 TRAJECTORY_PATH = "/tmp/mini-trajectory.json"
 REGISTRY_PATH = "/tmp/aso_litellm_registry.json"
@@ -96,9 +99,22 @@ class MiniSweAgentHarness(HarnessAdapter):
         )
         patch = patch_result.stdout if patch_result.exit_code == 0 else None
 
+        trajectory = (
+            await self._manager.exec(run_id, f"cat {TRAJECTORY_PATH}", timeout_s=30)
+        ).stdout
         steps, model_requests, commands, final_message = self._parse_trajectory(
-            (await self._manager.exec(run_id, f"cat {TRAJECTORY_PATH}", timeout_s=30)).stdout
+            trajectory
         )
+
+        if steps is None and result.exit_code == 0:
+            # Exit 0 with no trajectory is the shape that hid an agent doing
+            # nothing behind a "completed" run. Say so where it can be found.
+            log.warning(
+                "mini-swe-agent exited 0 but left no readable trajectory at %s; "
+                "step counts are unknown for this run. stderr tail: %s",
+                TRAJECTORY_PATH,
+                result.stderr[-500:] or "(empty)",
+            )
 
         if result.timed_out:
             status, error_type, error_message = "timeout", "timeout", "harness timed out"
@@ -138,11 +154,18 @@ class MiniSweAgentHarness(HarnessAdapter):
         )
 
     @staticmethod
-    def _parse_trajectory(raw: str) -> tuple[int, int, int, str | None]:
+    def _parse_trajectory(raw: str) -> tuple[int | None, int | None, int | None, str | None]:
+        """Counts from the trajectory, or None when it cannot be read.
+
+        `cat` of a missing path yields empty stdout, which parses the same as
+        corrupt JSON — so returning zeros reported "the agent took no steps"
+        for a run whose proxy metrics prove it called the model and got an
+        answer. That is a missing measurement, not a measured zero (§4).
+        """
         try:
             data = json.loads(raw)
         except (json.JSONDecodeError, ValueError):
-            return 0, 0, 0, None
+            return None, None, None, None
         messages = data.get("messages", data if isinstance(data, list) else [])
         assistant = [m for m in messages if isinstance(m, dict) and m.get("role") == "assistant"]
         users = [m for m in messages if isinstance(m, dict) and m.get("role") == "user"]

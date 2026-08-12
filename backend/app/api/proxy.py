@@ -45,6 +45,13 @@ class RunToken:
     input_price: float = 0.0
     output_price: float = 0.0
     rate_limited: bool = False
+    # A retryable upstream failure (5xx) as opposed to a rejected request.
+    # Recorded for the same reason as rate_limited: the orchestrator must be
+    # able to tell "the provider blew up" from "the harness broke" without
+    # parsing harness error strings, and a 504 from a slow model is not a
+    # harness bug.
+    provider_error: bool = False
+    provider_error_detail: str = ""
     # Which provider serves THIS run. A run declares its provider in its
     # combination, so a fake combination stays on the fake provider even when a
     # real OpenRouter key is configured — otherwise the zero-cost path becomes
@@ -124,6 +131,8 @@ def run_usage(run_id: str) -> dict[str, Any]:
         "output_tokens": entry.output_tokens,
         "cost_usd": round(entry.cost_usd, 6),
         "rate_limited": entry.rate_limited,
+        "provider_error": entry.provider_error,
+        "provider_error_detail": entry.provider_error_detail,
         "budget_exhausted": entry.requests >= entry.max_requests,
     }
 
@@ -212,6 +221,13 @@ async def chat_completions(
             # without parsing harness error strings.
             entry.rate_limited = True
             raise HTTPException(429, f"provider error [{exc.category}]: {exc}") from exc
+        if exc.retryable:
+            # Same contract as rate_limited above. Without this a 504 from a
+            # model slower than the provider's own gateway was indistinguishable
+            # from a broken harness, so the run died terminally and the failure
+            # was booked against the harness.
+            entry.provider_error = True
+            entry.provider_error_detail = f"{exc.status or 502} after {latency}ms"
         raise HTTPException(502, f"provider error [{exc.category}]: {exc}") from exc
     latency = int((time.monotonic() - start) * 1000)
 

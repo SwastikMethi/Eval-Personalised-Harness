@@ -33,8 +33,10 @@ class HarnessRunResult:
     input_tokens: int | None
     output_tokens: int | None
     cached_tokens: int | None
-    model_requests: int
-    agent_steps: int
+    # None where the harness could not report it — an unreadable trajectory is
+    # an absent measurement, not a measured zero.
+    model_requests: int | None
+    agent_steps: int | None
     tool_calls: int
     # None where the harness has no such concept — a CodeAgent runs Python, not
     # shell commands. Reporting 0 would read as "executed nothing", which is a
