@@ -877,6 +877,33 @@ export default function NewRun() {
                     not be collected. Fix the commands above and re-run.
                   </Alert>
                 )}
+                {/* The actual failure output. "exit 2" alone is undiagnosable. */}
+                {baseline &&
+                  Object.entries(baseline.steps)
+                    .filter(([, s]) => s.exit_code !== 0 && s.output)
+                    .map(([name, s]) => (
+                      <Box key={name} sx={{ mb: 1.5 }}>
+                        <Typography variant="overline">{name} output</Typography>
+                        <Box
+                          component="pre"
+                          sx={{
+                            m: 0,
+                            p: 1.5,
+                            maxHeight: 260,
+                            overflow: 'auto',
+                            backgroundColor: C.bg,
+                            border: `1px solid ${C.lineSoft}`,
+                            fontFamily: fonts.mono,
+                            fontSize: '0.68rem',
+                            lineHeight: 1.5,
+                            color: C.dim,
+                            whiteSpace: 'pre-wrap',
+                          }}
+                        >
+                          {s.output}
+                        </Box>
+                      </Box>
+                    ))}
                 {baseline?.warn && !baselineBroken && (
                   <Alert severity="warning" sx={{ mb: 1.5 }}>
                     Baseline is partially failing. You can proceed — those failures are excluded

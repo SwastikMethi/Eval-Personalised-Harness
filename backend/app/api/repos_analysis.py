@@ -220,7 +220,15 @@ def _baseline_payload(record: BaselineResult) -> dict[str, Any]:
         "base_commit": record.base_commit,
         "benchmarkable": record.benchmarkable,
         "warn": record.warn,
-        "steps": {k: {"exit_code": v.get("exit_code")} for k, v in (record.steps or {}).items()},
+        # Include the tail of failing output. Without it "exit 2" is
+        # undiagnosable without opening the database by hand.
+        "steps": {
+            k: {
+                "exit_code": v.get("exit_code"),
+                "output": (v.get("stdout") or "")[-4000:] if v.get("exit_code") else "",
+            }
+            for k, v in (record.steps or {}).items()
+        },
         "test_case_count": len(record.test_cases or []),
     }
 

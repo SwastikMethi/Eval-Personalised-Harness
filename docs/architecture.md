@@ -51,7 +51,7 @@ Crash recovery: containers are labeled `aso.run_id`; on startup a reconciliation
 
 Grading never happens in the agent's workspace. The only agent input is the patch, applied to a fresh snapshot and run with evaluator-owned commands. Patches touching test files, CI config, or Makefiles score zero (prohibited-file gate). Regressions are detected by per-test-case identity against the baseline (vanished tests count as regressions). When no deterministic signal exists the task is marked `INSUFFICIENT_EVALUATION_SIGNAL` and produces no winner.
 
-MVP caveat: evaluator commands execute on the host against the fresh snapshot (same trust level as baseline validation). Moving evaluation execution into a fresh container is the next hardening step.
+Baseline and evaluation execute **inside a container**, not on the host. Running them on the host let `pip` and the test runner resolve to different interpreters, so an install could report success while installing nothing the tests could see. Dependencies are installed once per repo into a prepared image reused by the baseline, every evaluation and every agent run; the install command still runs inside, so a dependency added by an agent's patch is picked up.
 
 ## Scoring
 

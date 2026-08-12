@@ -190,4 +190,22 @@ Keep entries short: **what changed · why · what it unblocks · what to verify.
 
 ---
 
+## 2026-08-12 — Baseline and evaluation moved into containers
+
+**Why.** A baseline reported INSTALL pass / TEST exit 2 / 0 tests. `pip` wrote to miniforge 3.13 while pytest ran under uv's 3.12 — the venv has `pytest` but no `pip`, so they resolved to different interpreters. Install "succeeded" at installing nothing. [[Known Defects]] #16.
+
+**Fix.** `sandboxes/container_exec.py` — the executor `exec.py` always said was coming ("HostExecutor runs on the host; the Docker executor lands in Stage 4 behind the same shape"). `baseline.py` and `evaluators/engine.py` now take an `execute` callable defaulting to the host one, so unit tests stay fast and Docker-free while production runs in a container.
+
+**Caching was not optional.** Web_Scraper pulls streamlit, langchain, selenium, playwright and faiss-cpu — minutes per install, paid per evaluation *and* per agent run, since the sandbox PREP phase installs too. A 36-run matrix was hours of pure installation. `sandboxes/prepared.py` builds one image per repo keyed by a manifest hash; `SandboxManager.create` takes an image override so the agent's install collapses to a no-op as well.
+
+**Why the cache is safe:** the install command still runs inside the container. Normally a no-op, but it picks up a dependency an agent's patch adds. A failed build is reported as the baseline's install step with its log rather than an opaque build error.
+
+**Hardening kept in one place.** Container creation flags moved to `manager.container_kwargs()`, shared by agent and evaluation containers — configured separately they would drift, and the weaker one is what would matter.
+
+**Bug caught in my own helper:** the evaluator grades in `workdir/graded`, but the executor hardcoded `/workspace`. It now translates the requested directory into the container. Covered by a test.
+
+**Verified.** 10 new Docker-gated tests including the one-interpreter regression and installed-then-importable — the exact reported failure. 143 backend + 25 frontend; lint, typecheck, demo green. `docs/architecture.md` and [[Evaluation Engine]] corrected: both said evaluation runs on the host.
+
+---
+
 <!-- New entries above this line -->

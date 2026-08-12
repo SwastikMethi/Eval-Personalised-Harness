@@ -53,7 +53,7 @@ export interface BaselineOutcome {
   base_commit: string
   benchmarkable: boolean
   warn: boolean
-  steps: Record<string, { exit_code: number }>
+  steps: Record<string, { exit_code: number; output?: string }>
   test_case_count: number
 }
 

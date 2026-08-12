@@ -61,9 +61,13 @@ Similarity may appear as optional diagnostic information with **zero weight** in
 
 §15 asks for a composable `Evaluator` ABC with ten named evaluators. Today this is a **single `evaluate()` function** plus module-level helpers, and `Lint`/`TypeCheck` evaluators do not exist. Behaviour is correct; the architecture is not. Refactor is [[Roadmap]] Phase 6.
 
-## MVP caveat
+## Where evaluator commands run
 
-Evaluator commands execute **on the host** against the fresh snapshot (same trust level as baseline validation). Moving evaluation into a fresh container is the next hardening step. See [[Sandbox]].
+**In a container**, as of 2026-08-12. Previously they ran on the host, which was both a weaker trust boundary — evaluation executes the *agent's patch* — and a correctness bug: `pip` and the test runner resolved independently, so on a machine with two Pythons install wrote to one interpreter while the tests ran under another. Install reported success having installed nothing the tests could see. See [[Known Defects]] #16.
+
+Dependencies are installed **once per repo** into a prepared image (`aso-prepared:<repo>-<manifest hash>`), reused by the baseline, every evaluation, and every agent run. The install command still runs inside the container — normally a no-op, but it picks up a dependency an agent's patch adds, which is what makes the cache safe.
+
+Still on the default bridge network: installs need egress, and unlike the agent sandbox there is no model to isolate from. Sealing evaluation after the install phase remains a possible later step.
 
 ## Related
 

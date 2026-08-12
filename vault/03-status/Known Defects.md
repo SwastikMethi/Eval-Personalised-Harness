@@ -20,7 +20,19 @@ Compounded by a UI defect: `commits.isError` was never rendered, so a failed clo
 
 ---
 
-**Status: all 15 fixed.** #1–#3 Phase 2 · #4–#6 Phase 3 · #7–#8 Phase 1 · #9 Phase 3 · **#10–#14 found by attempting the first real model run**. Kept as a record of what was wrong and what guards it now.
+## 16. Install and tests ran under different interpreters ✅ FIXED (2026-08-12)
+
+Baselining a repo showed **INSTALL pass · TEST exit 2 · BASELINE TESTS 0**. The captured output had `pip` writing to `…/miniforge/base/lib/python3.13/site-packages` while pytest ran under `…/uv/python/cpython-3.12.13`. Install succeeded at installing nothing the tests could see, then the tests failed on a dependency that had just been "installed".
+
+Confirmed at the source: the uv-created venv contains `pytest` but **no `pip`**, so `pytest` resolved inside the venv (3.12) while `pip` fell through `PATH` to miniforge (3.13). Not fixable by editing commands, and silent — the contradiction only surfaced because someone read the raw output.
+
+Fixed by running baseline and evaluation **in a container** (which `sandboxes/exec.py` had always described as the intended shape), with dependencies installed once per repo into a prepared image. Also a security improvement: evaluation executes the agent's patch, which previously ran on the host.
+
+Two things this exposed about the UI: `exit 2` alone is undiagnosable, so failing step output is now rendered in the Setup panel; and diagnosing it required opening SQLite by hand, which is not a thing a user should ever do.
+
+---
+
+**Status: all 16 fixed.** #1–#3 Phase 2 · #4–#6 Phase 3 · #7–#8 Phase 1 · #9 Phase 3 · **#10–#14 found by attempting the first real model run**. Kept as a record of what was wrong and what guards it now.
 
 > Defects #10–#14 are the important ones: each alone made a sandboxed benchmark impossible, and none was visible from the test suite, because nothing had ever executed a real run.
 
