@@ -6,6 +6,34 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+_MISSING_MARKERS = ("command not found", "no module named", "modulenotfounderror")
+
+
+def probe_failed(dependency: str, command: str, result: Any) -> Exception:
+    """Explain a failed dependency probe without overclaiming.
+
+    Both adapters used to raise "<dep> missing in sandbox image" on ANY non-zero
+    exit, so when a container was already dying the run reported a missing
+    dependency. That message was false — the image installs both harnesses and
+    they import cleanly — and it sent a debugging session after an image problem
+    that did not exist. Only claim absence when the output actually says so.
+
+    Returns SandboxError so the orchestrator files it as SETUP, not as a harness
+    crash: a probe that could not run is not the harness misbehaving.
+    """
+    from app.sandboxes.manager import SandboxError
+
+    output = f"{result.stdout}{result.stderr}".strip()
+    if any(marker in output.lower() for marker in _MISSING_MARKERS):
+        detail = f"{dependency} is not installed in the sandbox image"
+    else:
+        detail = (
+            f"could not verify {dependency}: the probe exited {result.exit_code} "
+            f"without saying it is absent, so this is a sandbox failure rather "
+            f"than a missing dependency"
+        )
+    return SandboxError(f"{detail}. `{command}` output: {output[-300:] or '(none)'}")
+
 
 @dataclass
 class HarnessRunRequest:

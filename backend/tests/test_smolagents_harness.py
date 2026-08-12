@@ -149,11 +149,20 @@ async def test_prepare_fails_loudly_when_smolagents_is_missing(tmp_path: Path) -
     class Missing(StubSandbox):
         async def exec(self, run_id: str, command: str, timeout_s: int = 600) -> CommandResult:
             if "import smolagents" in command:
+                # What an absent module actually prints. Exit 1 with no output
+                # is what a dying container looks like, and the adapter used to
+                # report both as a missing dependency.
                 return CommandResult(
-                    command=command, exit_code=1, stdout="", stderr="", duration_s=0.1
+                    command=command,
+                    exit_code=1,
+                    stdout="",
+                    stderr="ModuleNotFoundError: No module named 'smolagents'",
+                    duration_s=0.1,
                 )
             return await super().exec(run_id, command, timeout_s)
 
+    from app.sandboxes.manager import SandboxError
+
     harness = SmolagentsHarness(Missing({}))  # type: ignore[arg-type]
-    with pytest.raises(RuntimeError, match="smolagents missing"):
+    with pytest.raises(SandboxError, match="not installed in the sandbox image"):
         await harness.prepare(_request(tmp_path))

@@ -25,7 +25,12 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
-from app.harnesses.base import HarnessAdapter, HarnessRunRequest, HarnessRunResult
+from app.harnesses.base import (
+    HarnessAdapter,
+    HarnessRunRequest,
+    HarnessRunResult,
+    probe_failed,
+)
 from app.sandboxes.manager import SandboxManager
 
 RUNNER_PATH = "/tmp/aso_smolagents_runner.py"
@@ -115,7 +120,7 @@ class SmolagentsHarness(HarnessAdapter):
             run_id, "python3 -c 'import smolagents; print(smolagents.__version__)'", timeout_s=60
         )
         if check.exit_code != 0:
-            raise RuntimeError("smolagents missing in sandbox image")
+            raise probe_failed("smolagents", "import smolagents", check)
         await self._manager.exec(run_id, _write_file_cmd(RUNNER_PATH, RUNNER), timeout_s=60)
 
     async def run(self, request: HarnessRunRequest) -> HarnessRunResult:

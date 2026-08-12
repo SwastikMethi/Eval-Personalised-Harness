@@ -15,7 +15,12 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
-from app.harnesses.base import HarnessAdapter, HarnessRunRequest, HarnessRunResult
+from app.harnesses.base import (
+    HarnessAdapter,
+    HarnessRunRequest,
+    HarnessRunResult,
+    probe_failed,
+)
 from app.sandboxes.manager import SandboxManager
 
 log = logging.getLogger(__name__)
@@ -46,7 +51,7 @@ class MiniSweAgentHarness(HarnessAdapter):
         run_id = request.metadata["run_id"]
         check = await self._manager.exec(run_id, "mini --help", timeout_s=60)
         if check.exit_code != 0:
-            raise RuntimeError("mini-swe-agent CLI missing in sandbox image")
+            raise probe_failed("the mini-swe-agent CLI", "mini --help", check)
 
     async def run(self, request: HarnessRunRequest) -> HarnessRunResult:
         started = _now()

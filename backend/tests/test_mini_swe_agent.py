@@ -87,10 +87,20 @@ async def test_prepare_fails_loudly_when_cli_is_missing(tmp_path: Path) -> None:
     class NoCli(KeyedSandbox):
         async def exec(self, run_id: str, command: str, timeout_s: int = 600) -> CommandResult:
             self.seen_ids.append(run_id)
+            # Say what a genuinely absent binary says. The previous fixture
+            # returned exit 1 with no output at all, which is indistinguishable
+            # from a container that died — and the adapter claimed a missing
+            # dependency for both.
             return CommandResult(
-                command=command, exit_code=1, stdout="", stderr="", duration_s=0.1
+                command=command,
+                exit_code=127,
+                stdout="",
+                stderr="sh: 1: mini: command not found",
+                duration_s=0.1,
             )
 
+    from app.sandboxes.manager import SandboxError
+
     harness = MiniSweAgentHarness(NoCli())  # type: ignore[arg-type]
-    with pytest.raises(RuntimeError, match="mini-swe-agent CLI missing"):
+    with pytest.raises(SandboxError, match="not installed in the sandbox image"):
         await harness.prepare(_request(tmp_path))

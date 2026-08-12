@@ -54,6 +54,29 @@ DEFAULT_MAX_MODEL_REQUESTS = 8
 
 # Backoff before a RATE_LIMITED run returns to PENDING. Capped because the
 # limit that matters is daily: retrying sooner just re-spends the quota.
+def _category_for(exc: BaseException) -> ErrorCategory:
+    """Whose fault was this failure?
+
+    Everything used to be filed as HARNESS, so a container Docker killed, a
+    network that vanished, or a failed seal was recorded as a harness crash.
+    Harness reliability is the product's central metric — booking sandbox
+    faults against whichever harness happened to be scheduled makes that metric
+    a measure of Docker's mood. SETUP already exists for exactly this
+    ("repo/sandbox/dependency failure").
+    """
+    from app.sandboxes.manager import SandboxError
+
+    if isinstance(exc, SandboxError):
+        return ErrorCategory.SETUP
+    try:  # docker is optional at runtime, as in recovery.reconcile()
+        from docker.errors import DockerException
+    except ImportError:
+        return ErrorCategory.HARNESS
+    # 409 "container is not running", 404 "network not found" — infrastructure
+    # the harness neither caused nor could have prevented.
+    return ErrorCategory.SETUP if isinstance(exc, DockerException) else ErrorCategory.HARNESS
+
+
 RATE_LIMIT_BACKOFF_S = (30.0, 120.0, 600.0)
 # Throttling is worth waiting out indefinitely; an upstream 5xx is not. A model
 # slower than the provider's gateway fails the same way every time, and each
@@ -225,7 +248,7 @@ class QueueWorker:
                 log.info("run cancelled", extra={"run_id": run_id, "event_type": "run_cancelled"})
             except Exception as exc:  # noqa: BLE001 - categorize, never crash the loop
                 log.exception("run failed", extra={"run_id": run_id, "event_type": "run_failed"})
-                self._fail(run_id, ErrorCategory.HARNESS, str(exc))
+                self._fail(run_id, _category_for(exc), str(exc))
 
     def _settle_experiment(self, session: Session, run_id: str) -> None:
         """Mark an experiment completed once every one of its runs is terminal.
