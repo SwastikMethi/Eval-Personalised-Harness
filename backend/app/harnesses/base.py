@@ -36,7 +36,10 @@ class HarnessRunResult:
     model_requests: int
     agent_steps: int
     tool_calls: int
-    commands_executed: int
+    # None where the harness has no such concept — a CodeAgent runs Python, not
+    # shell commands. Reporting 0 would read as "executed nothing", which is a
+    # measurement it never made (§4: mark unavailable metrics null).
+    commands_executed: int | None
     error_type: str | None
     error_message: str | None
     raw_metadata: dict[str, Any] = field(default_factory=dict)

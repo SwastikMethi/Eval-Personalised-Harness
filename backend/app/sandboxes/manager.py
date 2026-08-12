@@ -226,13 +226,20 @@ class SandboxManager:
         # relay could not reach it at all. Every run then failed deep inside
         # the harness with an opaque "Connection error" instead of failing
         # closed here, which is precisely what this check exists to prevent.
+        # Retried, because the relay container is started detached moments
+        # earlier and its listener may not be up yet. A single shot turned that
+        # startup race into a failed run. Still fail-closed: exhausting every
+        # attempt refuses to run.
+        probe = (
+            f"timeout 10 python3 -c \"import urllib.request;"
+            f"urllib.request.urlopen('http://{relay_name}:{PROXY_PORT}/api/v1/health',timeout=8)"
+            '.read()"'
+        )
         reachable = await self.exec(
             run_id,
-            f"timeout 20 python3 -c \"import urllib.request;"
-            f"urllib.request.urlopen('http://{relay_name}:{PROXY_PORT}/api/v1/health',timeout=15)"
-            '.read()"'
-            " && echo PROXY_OK || echo PROXY_DEAD",
-            timeout_s=30,
+            f"for i in 1 2 3 4 5 6; do {probe} >/dev/null 2>&1 && "
+            "{ echo PROXY_OK; break; }; sleep 2; done; echo DONE",
+            timeout_s=90,
         )
         if "PROXY_OK" not in reachable.stdout:
             await self.cleanup(run_id)

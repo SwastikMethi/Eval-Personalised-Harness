@@ -168,7 +168,7 @@ class SmolagentsHarness(HarnessAdapter):
             model_requests=int(report.get("steps") or 0),
             agent_steps=int(report.get("steps") or 0),
             tool_calls=int(report.get("tool_calls") or 0),
-            commands_executed=0,  # CodeAgent executes Python, not shell commands
+            commands_executed=None,  # CodeAgent executes Python, not shell commands
             error_type=error_type,
             error_message=error_message,
             raw_metadata={
@@ -176,6 +176,9 @@ class SmolagentsHarness(HarnessAdapter):
                 "truncated": result.truncated,
                 "traceback": report.get("traceback"),
                 "stdout_tail": result.stdout[-2000:],
+                # smolagents logs its reasoning to stderr, so stdout alone left
+                # a completed run with no transcript to inspect at all.
+                "stderr_tail": result.stderr[-4000:],
             },
         )
 
