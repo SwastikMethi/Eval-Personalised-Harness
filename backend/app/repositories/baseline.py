@@ -17,6 +17,44 @@ class BaselineOutcome:
     warn: bool  # partially failing baseline — proceed with warning
     steps: dict[str, dict[str, Any]] = field(default_factory=dict)
     test_cases: list[tuple[str, str]] = field(default_factory=list)
+    # Changes the REPO needs for its own suite to run — surfaced to the user,
+    # never written. A repo whose tests need pytest but whose requirements.txt
+    # omits it is a fact about the repo, not a failure of the benchmark.
+    suggested_repo_changes: list[dict[str, str]] = field(default_factory=list)
+    # True when the suite only ran after the runner was installed for it, so
+    # the caller can tell "worked" from "worked once we fixed it".
+    repaired: bool = False
+
+
+# A runner that is not installed produces one of these, and the message is the
+# only reliable signal: exit codes vary (1 from python -m, 127 from a shell).
+_MISSING_RUNNER_PATTERNS = (
+    "no module named",
+    "not found",
+    "command not found",
+    "is not recognized",
+)
+
+# Installing the runner is what makes the suite runnable at all. Kept minimal:
+# these are test runners, not a general dependency solver.
+_RUNNER_INSTALL = {
+    "pytest": "python -m pip install pytest",
+    "vitest": "npm install --no-save vitest",
+    "jest": "npm install --no-save jest",
+}
+
+
+def _looks_like_missing_runner(result: CommandResult, runner: str | None) -> bool:
+    """Did the test command fail because its runner is absent?
+
+    Distinct from "the tests failed": a suite that runs and reports failures is
+    a legitimate baseline, while a runner that was never installed means the
+    suite did not execute at all.
+    """
+    if result.exit_code == 0 or not runner:
+        return False
+    haystack = f"{result.stdout}\n{result.stderr}".lower()
+    return runner.lower() in haystack and any(p in haystack for p in _MISSING_RUNNER_PATTERNS)
 
 
 def _record(result: CommandResult) -> dict[str, Any]:
@@ -64,6 +102,34 @@ def run_baseline(
         result = execute(test_cmd, workspace)
         parser = PARSERS.get(test_framework or "generic", parse_generic)
         report = parser(result)
+
+        # The suite did not run because its runner is missing. Install it and
+        # try once more, rather than reporting the repo unbenchmarkable.
+        # Previously this depended on the analysing model volunteering
+        # "&& pip install pytest", so the same repo was scoreable or not
+        # depending on model whim.
+        if _looks_like_missing_runner(result, test_framework) and (
+            install := _RUNNER_INSTALL.get(test_framework or "")
+        ):
+            outcome.steps["test_before_repair"] = _record(result)
+            repair = execute(install, workspace)
+            outcome.steps["runner_install"] = _record(repair)
+            if repair.exit_code == 0:
+                result = execute(test_cmd, workspace)
+                report = parser(result)
+                outcome.repaired = True
+                outcome.suggested_repo_changes.append(
+                    {
+                        "file": (
+                            "requirements.txt" if test_framework == "pytest" else "package.json"
+                        ),
+                        "add": test_framework or "",
+                        "why": (
+                            f"the suite needs {test_framework}, but installing the repo's own "
+                            f"dependencies does not provide it — every run has to install it first"
+                        ),
+                    }
+                )
         outcome.steps["test"] = _record(result) | {
             "totals": report.totals,
             "parse_ok": report.parse_ok,

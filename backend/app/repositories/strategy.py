@@ -76,6 +76,9 @@ class StrategyDecision:
     # (spec §10: record provenance, never assume trustworthiness).
     provenance: dict[str, str] = field(default_factory=dict)
     warn: bool = False
+    # Things the REPO needs for its own suite to run. Shown to the user and
+    # never written — this tool measures a repository, it does not edit one.
+    suggested_repo_changes: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def scoreable(self) -> bool:
@@ -89,6 +92,21 @@ class StrategyDecision:
 def _step_ok(outcome: BaselineOutcome, step: str) -> bool:
     record = outcome.steps.get(step)
     return record is not None and record.get("exit_code") == 0
+
+
+def _has_real_test_cases(outcome: BaselineOutcome) -> bool:
+    """Cases that came from a framework parser, not from an exit code.
+
+    `parse_generic` synthesises a single ("__command__", failed) case from the
+    exit status alone, so `sh: pytest: not found` counted as "1 test case" and
+    could satisfy this rung. Grading a matrix against a runner that never ran
+    is precisely the fabrication this ladder exists to prevent, so the cases
+    must be backed by `parse_ok`.
+    """
+    if not outcome.test_cases:
+        return False
+    record = outcome.steps.get("test") or {}
+    return bool(record.get("parse_ok"))
 
 
 def decide_strategy(
@@ -116,6 +134,7 @@ def decide_strategy(
     outcome = run_baseline() if (run_baseline and has_commands) else None
     if outcome is not None:
         decision.warn = outcome.warn
+        decision.suggested_repo_changes = list(outcome.suggested_repo_changes)
 
     # Rung 1 — tests the commit brings with it. Cheapest and strongest, but the
     # environment must still be able to run them, so a failed install
@@ -150,11 +169,13 @@ def decide_strategy(
     # that errors out with nothing readable is silence, not a passing suite.
     if outcome is None:
         attempts.append(RungAttempt(2, REPO_TESTS, False, "no test command to verify"))
-    elif outcome.benchmarkable and outcome.test_cases:
+    elif outcome.benchmarkable and _has_real_test_cases(outcome):
+        repaired = " after installing the missing runner" if outcome.repaired else ""
         attempts.append(
             RungAttempt(
-                2, REPO_TESTS, True, f"{len(outcome.test_cases)} test case(s) parsed",
-                {"test_cases": len(outcome.test_cases)},
+                2, REPO_TESTS, True,
+                f"{len(outcome.test_cases)} test case(s) parsed{repaired}",
+                {"test_cases": len(outcome.test_cases), "repaired": outcome.repaired},
             )
         )
         decision.strategy = REPO_TESTS
@@ -166,7 +187,7 @@ def decide_strategy(
                 2,
                 REPO_TESTS,
                 False,
-                "no test case was parsed from the suite"
+                "the test command produced no parseable case — the runner may not have run"
                 if outcome.benchmarkable
                 else "baseline did not complete (install, build or collection failed)",
                 {"test_cases": len(outcome.test_cases), "steps": sorted(outcome.steps)},

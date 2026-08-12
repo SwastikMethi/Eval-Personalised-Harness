@@ -20,7 +20,13 @@ CMDS = {"install": "pip install -r requirements.txt", "test": "pytest -v", "buil
 
 def baseline(**kw):  # type: ignore[no-untyped-def]
     defaults = {"benchmarkable": True, "warn": False, "steps": {}, "test_cases": []}
-    return lambda: BaselineOutcome(**{**defaults, **kw})
+    merged = {**defaults, **kw}
+    # A real baseline that parsed cases always records the test step that
+    # produced them; cases without `parse_ok` came from an exit code alone and
+    # are not evidence (see test_runner_repair.py).
+    if merged["test_cases"] and "test" not in merged["steps"]:
+        merged["steps"] = {**merged["steps"], "test": {"exit_code": 0, "parse_ok": True}}
+    return lambda: BaselineOutcome(**merged)
 
 
 def test_commit_tests_wins_when_the_commit_brings_tests() -> None:
