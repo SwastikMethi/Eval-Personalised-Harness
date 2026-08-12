@@ -35,6 +35,7 @@ from app.models import (
     Experiment,
     ExperimentCombination,
     HiddenTestCandidate,
+    ModelRequestMetric,
     ModelSnapshot,
     Repository,
     RunEvent,
@@ -343,7 +344,7 @@ class QueueWorker:
                 session.commit()
 
             result = await harness.run(request)
-            usage = run_usage(run_id)
+            usage = self._persisted_usage(run_id, run_usage(run_id))
 
             # Provider throttling is not a harness bug. Park the run and let it
             # come back rather than burning it as FAILED (spec §30 criterion 24)
@@ -376,6 +377,19 @@ class QueueWorker:
                 elif result.status == "timeout":
                     transition(run, RunState.TIMED_OUT)
                     run.error_category = ErrorCategory.TIMEOUT
+                elif self._looks_like_provider_timeout(result, usage):
+                    # Every request succeeded upstream, yet the harness reported
+                    # a generation failure: the provider was slower than the
+                    # client would wait. That is a timeout, not a broken
+                    # harness, and execution efficiency is 15% of the score —
+                    # slowness should read as a measurement, not a crash.
+                    transition(run, RunState.TIMED_OUT)
+                    run.error_category = ErrorCategory.TIMEOUT
+                    run.error_message = (
+                        "provider responded but slower than the client would wait; "
+                        f"{usage.get('requests')} upstream requests all succeeded. "
+                        + (result.error_message or "")[:1200]
+                    )
                 else:
                     transition(run, RunState.FAILED)
                     run.error_category = ErrorCategory.HARNESS
@@ -530,6 +544,45 @@ class QueueWorker:
             return None
         image, _ = ensure_prepared_image(workspace, install, repo_id)
         return image
+
+    @staticmethod
+    def _looks_like_provider_timeout(result: Any, usage: dict[str, Any]) -> bool:
+        """Harness failed, but every upstream request succeeded.
+
+        The signature of a client giving up on a slow provider: requests were
+        made, all returned 200, and the harness still could not get output.
+        A genuinely broken harness either makes no requests or sees errors.
+        """
+        if result.status != "failed":
+            return False
+        requests = usage.get("requests") or 0
+        return requests > 0 and (usage.get("failed_requests") or 0) == 0
+
+    def _persisted_usage(self, run_id: str, live: dict[str, Any]) -> dict[str, Any]:
+        """Cumulative usage for a run, from the metric rows.
+
+        `run_usage()` reads the in-memory run token, which is reissued on every
+        attempt — so a retried run reported only its LAST attempt while having
+        spent every attempt's quota. The metric rows persist across attempts and
+        restarts, so they are the honest total. Flags (rate_limited,
+        budget_exhausted) still come from the live token: they describe the
+        attempt that just ran.
+        """
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(ModelRequestMetric).where(ModelRequestMetric.run_id == run_id)
+            ).all()
+        if not rows:
+            return live
+        return {
+            **live,
+            "requests": len(rows),
+            "input_tokens": sum(r.input_tokens or 0 for r in rows),
+            "output_tokens": sum(r.output_tokens or 0 for r in rows),
+            # Requests that reached the provider but returned no usable
+            # response — the shape a client timeout leaves behind.
+            "failed_requests": sum(1 for r in rows if r.http_status != 200),
+        }
 
     def _model_prices(self, model_id: str) -> tuple[float, float]:
         """Per-token prices from the pinned snapshot; (0, 0) when unknown."""

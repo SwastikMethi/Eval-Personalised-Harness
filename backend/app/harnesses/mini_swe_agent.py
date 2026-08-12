@@ -81,6 +81,10 @@ class MiniSweAgentHarness(HarnessAdapter):
             # non-tty sandbox just fails. Silent startup keeps the banner out
             # of the captured output.
             "MSWEA_CONFIGURED=true MSWEA_SILENT_STARTUP=1 "
+            # Slow models exceed the client default and get abandoned mid-flight;
+            # the abandoned request still completes upstream and spends quota.
+            f"LITELLM_REQUEST_TIMEOUT={max(int(request.timeout_seconds) // 3, 120)} "
+            "LITELLM_NUM_RETRIES=0 "
             f"LITELLM_MODEL_REGISTRY_PATH={REGISTRY_PATH} "
             f"mini -y -m {shlex.quote(model)} -t {shlex.quote(request.task_prompt)} "
             f"-o {TRAJECTORY_PATH} --exit-immediately"

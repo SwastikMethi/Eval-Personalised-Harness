@@ -33,11 +33,52 @@ def _git(args: list[str], cwd: Path) -> str:
 
 
 def commit_task_description(repo: Path, sha: str) -> tuple[str, str]:
-    """Title + prompt drawn from the commit message (user-editable after)."""
+    """Title + prompt drawn from the commit message (spec §8.2, user-editable).
+
+    The commit text must be FRAMED, not handed over raw. Commit messages are
+    written in the past tense about finished work, so an unframed one reads as
+    a status report: given "added tool to get pokemon data", an agent replied
+    "Acknowledged: ... have been added. Please provide a specific task" and
+    stopped without editing a file. Every commit-replay run behaved that way.
+
+    Changed file PATHS are included as orientation. The diff itself never is —
+    that would hand over the answer and reduce the benchmark to transcription.
+    """
     subject = _git(["log", "-1", "--pretty=%s", sha], repo).strip()
     body = _git(["log", "-1", "--pretty=%b", sha], repo).strip()
-    prompt = f"{subject}\n\n{body}".strip()
-    return subject, prompt
+
+    changed: list[str] = []
+    try:
+        names = _git(["show", "--name-only", "--pretty=format:", sha], repo)
+        changed = [line.strip() for line in names.splitlines() if line.strip()]
+    except RuntimeError:
+        pass  # orientation is a nicety; never fail task creation over it
+
+    described = f"{subject}\n\n{body}".strip()
+    parts = [
+        "Implement the following change in this repository.",
+        "",
+        "The change is described below as it was originally written up, in the",
+        "past tense. It has NOT been applied here: the repository is at the state",
+        "immediately before it. Your job is to make it happen by editing files.",
+        "",
+        "--- change to implement ---",
+        described,
+        "--- end ---",
+    ]
+    if changed:
+        listed = "\n".join(f"  {p}" for p in changed[:20])
+        parts += [
+            "",
+            "The original change touched these files. Treat this as orientation,",
+            "not instruction — solve the problem properly rather than matching it:",
+            listed,
+        ]
+    parts += [
+        "",
+        "Finish by leaving your work saved in the working tree.",
+    ]
+    return subject, "\n".join(parts)
 
 
 @dataclass

@@ -47,6 +47,14 @@ try:
         model_id=os.environ["ASO_MODEL"],
         api_base=os.environ["OPENAI_BASE_URL"],
         api_key=os.environ["OPENAI_API_KEY"],
+        # A slow model routinely exceeds the client default: one measured run
+        # took 630s per request while the client gave up around 31s, retried,
+        # and every abandoned attempt still completed upstream and spent quota
+        # the agent never saw. Fail once, visibly; the queue owns retrying.
+        client_kwargs={
+            "timeout": float(os.environ.get("ASO_REQUEST_TIMEOUT", "600")),
+            "max_retries": 0,
+        },
     )
     agent = CodeAgent(
         tools=[],
@@ -123,6 +131,7 @@ class SmolagentsHarness(HarnessAdapter):
             f"ASO_MODEL={shlex.quote(request.model_id)} "
             f"ASO_TASK_FILE={TASK_PATH} ASO_OUT={RESULT_PATH} "
             f"ASO_MAX_STEPS={int(request.max_steps)} "
+            f"ASO_REQUEST_TIMEOUT={max(int(request.timeout_seconds) // 3, 120)} "
             f"ASO_IMPORTS={shlex.quote(json.dumps(AUTHORIZED_IMPORTS))} "
             f"python3 {RUNNER_PATH}"
         )

@@ -227,6 +227,62 @@ def test_rate_limited_run_is_parked_with_a_backoff_then_released() -> None:
         assert run.retry_after is None  # type: ignore[union-attr]
 
 
+def test_slow_provider_reads_as_timeout_not_a_broken_harness() -> None:
+    """Requests all succeeded upstream but the harness got no output — the
+    client gave up on a slow provider. Execution efficiency is 15% of the
+    score, so slowness must land as a measurement, not a crash."""
+    from types import SimpleNamespace
+
+    worker = QueueWorker(SessionLocal, proxy_base_url="http://test/proxy")
+    failed = SimpleNamespace(status="failed")
+
+    assert worker._looks_like_provider_timeout(
+        failed, {"requests": 6, "failed_requests": 0}
+    )
+    # A harness that never reached the provider is genuinely broken.
+    assert not worker._looks_like_provider_timeout(
+        failed, {"requests": 0, "failed_requests": 0}
+    )
+    # So is one whose requests errored upstream.
+    assert not worker._looks_like_provider_timeout(
+        failed, {"requests": 4, "failed_requests": 4}
+    )
+    # A completed run is never a timeout.
+    assert not worker._looks_like_provider_timeout(
+        SimpleNamespace(status="completed"), {"requests": 6, "failed_requests": 0}
+    )
+
+
+def test_usage_accumulates_across_attempts() -> None:
+    """The run token is reissued per attempt, so its counter reported only the
+    LAST attempt while every attempt had spent quota — making
+    max_model_requests a per-attempt cap that under-reported real spend."""
+    from app.models import ModelRequestMetric
+
+    worker = QueueWorker(SessionLocal, proxy_base_url="http://test/proxy")
+    run_id = _make_run(RunState.RUNNING)
+    with SessionLocal() as session:
+        for _attempt in range(2):
+            for _ in range(3):
+                session.add(
+                    ModelRequestMetric(
+                        run_id=run_id, model_id=MODEL, http_status=200,
+                        input_tokens=100, output_tokens=50,
+                    )
+                )
+        session.commit()
+
+    # The live token believes only the second attempt happened.
+    live = {"requests": 3, "input_tokens": 300, "output_tokens": 150, "rate_limited": False}
+    merged = worker._persisted_usage(run_id, live)
+
+    assert merged["requests"] == 6, "must count every attempt, not just the last"
+    assert merged["input_tokens"] == 600
+    assert merged["output_tokens"] == 300
+    # Live-only flags survive: they describe the attempt that just ran.
+    assert merged["rate_limited"] is False
+
+
 def test_backoff_lengthens_with_repeated_throttling() -> None:
     worker = QueueWorker(SessionLocal, proxy_base_url="http://test/proxy")
     run_id = _make_run(RunState.RUNNING)
