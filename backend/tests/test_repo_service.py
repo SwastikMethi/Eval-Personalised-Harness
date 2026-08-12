@@ -235,6 +235,24 @@ def test_baseline_warn_and_proceed(tmp_path: Path) -> None:
     assert ("x.py::t2", "failed") in failing.test_cases
 
 
+def test_baseline_rejects_a_test_command_that_produced_nothing(tmp_path: Path) -> None:
+    """"No module named pytest" is not a benchmarkable repo.
+
+    The command ran, exited non-zero and yielded zero parsed cases. Calling
+    that benchmarkable would let a whole matrix run against a repo whose tests
+    never execute, scoring every agent against silence.
+    """
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    outcome = run_baseline(
+        ws,
+        {"test": "echo '/usr/local/bin/python: No module named pytest'; exit 1"},
+        "pytest",
+    )
+    assert not outcome.benchmarkable
+    assert outcome.test_cases == []
+
+
 def test_baseline_install_failure_not_benchmarkable(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     ws.mkdir()

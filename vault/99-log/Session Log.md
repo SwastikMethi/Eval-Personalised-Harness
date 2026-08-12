@@ -208,4 +208,24 @@ Keep entries short: **what changed · why · what it unblocks · what to verify.
 
 ---
 
+## 2026-08-12 — `python -m` command forms; a repo finally baselines
+
+**Why.** `Pokemon-Battle-Simulator` still failed after the container fix, with `ModuleNotFoundError: No module named 'src'`. Its `src/` is a proper package, `tests/` has no `__init__.py`, and there is no pytest config — so bare `pytest` puts `tests/` on `sys.path` and the repo root never gets there.
+
+**Fix.** `detectors.py` now emits `python -m pip install …` and `{prefix}python -m pytest -v`. Same commands, interpreter pinned to whatever `python` is, and CWD on `sys.path`. Repos that already worked are unaffected; src-layout repos start working. `tests/test_src_layout.py` proves the mechanism with `python -P` (which disables CWD-on-path, isolating the one variable) rather than leaving it as a comment.
+
+**A worse bug found while verifying.** With pytest absent the baseline reported **benchmarkable: True with 0 test cases** — it only failed on a parsed `collection_error`, and "No module named pytest" parses as nothing at all. That would let a full matrix run against a repo whose tests never execute, scoring every agent against silence. Now a test command that exits non-zero AND yields zero cases is not benchmarkable.
+
+**Verified end to end on the real repo:**
+- detected commands are the module forms, nothing to hand-edit
+- baseline **19s first, 2s cached** — the prepared image is working
+- without pytest: correctly refuses, and the panel shows `No module named pytest`
+- with pytest added: **5 test cases, 3 passed, 2 failed**, benchmarkable with a warning
+
+Both original bugs are gone: `pandas` imports (containers) and `src` imports (`python -m`). The 2 remaining failures are the repo's own — a coroutine never awaited, and async tests with no `pytest-asyncio`. Precisely what the baseline exists to record so an agent is never blamed for them.
+
+**Suite** 148 backend + 25 frontend; lint, typecheck, demo green.
+
+---
+
 <!-- New entries above this line -->

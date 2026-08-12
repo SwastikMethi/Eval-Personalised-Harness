@@ -73,6 +73,13 @@ def run_baseline(
         if report.collection_error:
             outcome.benchmarkable = False
             return outcome
+        # The command ran and produced NOTHING we can read — a missing runner
+        # ("No module named pytest"), a bad invocation, a crash. Reporting that
+        # as benchmarkable would let a whole matrix run against a repo whose
+        # tests never execute, scoring every agent against silence.
+        if result.exit_code != 0 and not report.cases:
+            outcome.benchmarkable = False
+            return outcome
         if report.failed:
             outcome.warn = True  # spec §7: warn-and-proceed on partial failure
 

@@ -50,11 +50,15 @@ def _detect_python(root: Path, result: AnalysisResult) -> None:
     elif (root / "requirements.txt").exists():
         result.package_managers.append("pip")
         result.dependency_files.append("requirements.txt")
-        cmds.install = "pip install -r requirements.txt"
+        # `python -m pip` rather than `pip`: a bare `pip` resolves independently
+        # of `python`, so on a machine with more than one interpreter it can
+        # install into an environment the tests never see — reporting success
+        # while the tests then fail on the dependency it "installed".
+        cmds.install = "python -m pip install -r requirements.txt"
         prefix = ""
     else:
         result.package_managers.append("pip")
-        cmds.install = "pip install -e ." if pyproject.exists() else None
+        cmds.install = "python -m pip install -e ." if pyproject.exists() else None
         prefix = ""
     if pyproject.exists():
         result.dependency_files.append("pyproject.toml")
@@ -73,7 +77,11 @@ def _detect_python(root: Path, result: AnalysisResult) -> None:
         or (pyproject.exists() and "pytest" in pyproject.read_text(errors="replace"))
     )
     if has_pytest:
-        cmds.test = f"{prefix}pytest -v"
+        # `python -m pytest` rather than `pytest`: the module form puts the
+        # CURRENT directory on sys.path, whereas bare pytest puts the first
+        # parent without __init__.py there — usually `tests/`. A src-layout
+        # repo with no pytest config then cannot import its own package.
+        cmds.test = f"{prefix}python -m pytest -v"
         cmds.test_framework = "pytest"
     for loc in ("tests", "test"):
         if (root / loc).is_dir():
