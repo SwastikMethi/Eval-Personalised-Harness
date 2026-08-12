@@ -42,9 +42,13 @@ PROXY_PORT = 8005
 # to the run's internal network (where the agent can see it) and to the
 # default bridge (where it can reach the host). The agent still has exactly
 # one reachable destination and no route to the internet.
-RELAY_SCRIPT = f"""
+def relay_script(dst_host: str = "host.docker.internal", dst_port: int = PROXY_PORT,
+                 listen_port: int = PROXY_PORT, connect_timeout: int = 10) -> str:
+    """The relay program, parameterised so a test can drive it without Docker."""
+    return f"""
 import socket, threading
-DST = ("host.docker.internal", {PROXY_PORT})
+DST = ("{dst_host}", {dst_port})
+CONNECT_TIMEOUT = {connect_timeout}
 def pipe(a, b):
     try:
         while True:
@@ -63,15 +67,22 @@ def pipe(a, b):
             s.close()
 def handle(client):
     try:
-        upstream = socket.create_connection(DST, 10)
+        upstream = socket.create_connection(DST, CONNECT_TIMEOUT)
     except OSError:
         client.close()
         return
+    # create_connection's timeout PERSISTS on the socket, so without this every
+    # recv() inherits it: a model that thinks for longer than CONNECT_TIMEOUT
+    # raised socket.timeout here, the pipe closed both ends, and the agent saw
+    # "Server disconnected without sending a response" while the proxy happily
+    # recorded a 200. Waiting for a slow model is the normal case, not an error.
+    upstream.settimeout(None)
+    client.settimeout(None)
     threading.Thread(target=pipe, args=(client, upstream), daemon=True).start()
     threading.Thread(target=pipe, args=(upstream, client), daemon=True).start()
 srv = socket.socket()
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-srv.bind(("0.0.0.0", {PROXY_PORT}))
+srv.bind(("0.0.0.0", {listen_port}))
 srv.listen(64)
 while True:
     conn, _ = srv.accept()
@@ -179,7 +190,7 @@ class SandboxManager:
             # Relay first, so it is listening before the agent loses the bridge.
             relay = client.containers.run(
                 self._image,
-                command=["python3", "-c", RELAY_SCRIPT],
+                command=["python3", "-c", relay_script()],
                 detach=True,
                 name=relay_name,
                 labels={RUN_LABEL: run_id},
@@ -209,10 +220,17 @@ class SandboxManager:
             await self.cleanup(run_id)
             raise SandboxError(f"seal verification failed for {run_id}: egress still open")
 
+        # An HTTP round-trip, not a bare TCP connect. The relay accepts the
+        # client socket BEFORE it tries to reach the host, so connect() always
+        # succeeded — including when the proxy was bound to loopback and the
+        # relay could not reach it at all. Every run then failed deep inside
+        # the harness with an opaque "Connection error" instead of failing
+        # closed here, which is precisely what this check exists to prevent.
         reachable = await self.exec(
             run_id,
-            f"timeout 20 python3 -c \"import socket;"
-            f"socket.create_connection(('{relay_name}',{PROXY_PORT}),15)\""
+            f"timeout 20 python3 -c \"import urllib.request;"
+            f"urllib.request.urlopen('http://{relay_name}:{PROXY_PORT}/api/v1/health',timeout=15)"
+            '.read()"'
             " && echo PROXY_OK || echo PROXY_DEAD",
             timeout_s=30,
         )
@@ -220,7 +238,9 @@ class SandboxManager:
             await self.cleanup(run_id)
             raise SandboxError(
                 f"seal verification failed for {run_id}: model proxy unreachable via relay "
-                "— the run would make zero model requests and look successful"
+                "— the run would make zero model requests and look successful. "
+                f"Is the backend bound to 0.0.0.0:{PROXY_PORT}? A server on 127.0.0.1 "
+                "is not reachable from a container."
             )
 
     async def exec(

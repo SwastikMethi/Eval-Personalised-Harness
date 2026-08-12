@@ -387,7 +387,8 @@ class QueueWorker:
                     run.error_category = ErrorCategory.TIMEOUT
                     run.error_message = (
                         "provider responded but slower than the client would wait; "
-                        f"{usage.get('requests')} upstream requests all succeeded. "
+                        f"{usage.get('succeeded')} of {usage.get('requests')} "
+                        "upstream requests returned 200. "
                         + (result.error_message or "")[:1200]
                     )
                 else:
@@ -552,11 +553,19 @@ class QueueWorker:
         The signature of a client giving up on a slow provider: requests were
         made, all returned 200, and the harness still could not get output.
         A genuinely broken harness either makes no requests or sees errors.
+
+        This demands POSITIVE evidence — at least one recorded 200 — rather
+        than merely an absence of recorded failures. The earlier version asked
+        `failed_requests == 0`, which is trivially true when nothing was
+        recorded at all: an unreachable proxy wrote zero metric rows, and the
+        run was labelled "provider responded but slower than the client would
+        wait; 1 upstream requests all succeeded" when in truth no request had
+        reached any provider. Inventing a latency story for a connection
+        failure is exactly the kind of fake metric §4 forbids.
         """
         if result.status != "failed":
             return False
-        requests = usage.get("requests") or 0
-        return requests > 0 and (usage.get("failed_requests") or 0) == 0
+        return (usage.get("succeeded") or 0) > 0
 
     def _persisted_usage(self, run_id: str, live: dict[str, Any]) -> dict[str, Any]:
         """Cumulative usage for a run, from the metric rows.
@@ -573,12 +582,15 @@ class QueueWorker:
                 select(ModelRequestMetric).where(ModelRequestMetric.run_id == run_id)
             ).all()
         if not rows:
-            return live
+            # No rows is not "nothing failed" — it is no evidence either way.
+            # Say so explicitly so callers cannot read silence as success.
+            return {**live, "succeeded": 0, "failed_requests": 0}
         return {
             **live,
             "requests": len(rows),
             "input_tokens": sum(r.input_tokens or 0 for r in rows),
             "output_tokens": sum(r.output_tokens or 0 for r in rows),
+            "succeeded": sum(1 for r in rows if r.http_status == 200),
             # Requests that reached the provider but returned no usable
             # response — the shape a client timeout leaves behind.
             "failed_requests": sum(1 for r in rows if r.http_status != 200),

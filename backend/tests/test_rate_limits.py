@@ -237,19 +237,43 @@ def test_slow_provider_reads_as_timeout_not_a_broken_harness() -> None:
     failed = SimpleNamespace(status="failed")
 
     assert worker._looks_like_provider_timeout(
-        failed, {"requests": 6, "failed_requests": 0}
+        failed, {"requests": 6, "succeeded": 6, "failed_requests": 0}
     )
     # A harness that never reached the provider is genuinely broken.
     assert not worker._looks_like_provider_timeout(
-        failed, {"requests": 0, "failed_requests": 0}
+        failed, {"requests": 0, "succeeded": 0, "failed_requests": 0}
     )
     # So is one whose requests errored upstream.
     assert not worker._looks_like_provider_timeout(
-        failed, {"requests": 4, "failed_requests": 4}
+        failed, {"requests": 4, "succeeded": 0, "failed_requests": 4}
     )
     # A completed run is never a timeout.
     assert not worker._looks_like_provider_timeout(
-        SimpleNamespace(status="completed"), {"requests": 6, "failed_requests": 0}
+        SimpleNamespace(status="completed"),
+        {"requests": 6, "succeeded": 6, "failed_requests": 0},
+    )
+
+
+def test_unreachable_proxy_is_not_reported_as_a_slow_provider() -> None:
+    """The shape that produced a fabricated latency claim.
+
+    The proxy was bound to loopback, so the relay could not reach it: the
+    token counter had incremented on authorize, but no request ever reached a
+    provider and no metric row was written. Asking only `failed_requests == 0`
+    was trivially true, and the run was filed as "1 upstream requests all
+    succeeded" — a latency story invented for a connection failure.
+    """
+    from types import SimpleNamespace
+
+    worker = QueueWorker(SessionLocal, proxy_base_url="http://test/proxy")
+    run_id = _make_run(RunState.RUNNING)
+
+    # No ModelRequestMetric rows exist for this run — nothing reached upstream.
+    usage = worker._persisted_usage(run_id, {"requests": 1, "rate_limited": False})
+
+    assert usage["succeeded"] == 0
+    assert not worker._looks_like_provider_timeout(SimpleNamespace(status="failed"), usage), (
+        "no recorded 200 means no evidence the provider ever answered"
     )
 
 
