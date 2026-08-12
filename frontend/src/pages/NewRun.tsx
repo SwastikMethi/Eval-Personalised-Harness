@@ -178,6 +178,30 @@ export default function NewRun() {
   })
   const suggestion = askAi.data
 
+  /** Decides HOW this repo can be evaluated and proves it by executing a
+   *  baseline. Slower than "Suggest with AI" because it actually runs the
+   *  commands — which is the point: it answers "can this repo be scored at
+   *  all" BEFORE a matrix spends credits, rather than after every run comes
+   *  back INSUFFICIENT_EVALUATION_SIGNAL. */
+  const decideStrategy = useMutation({
+    mutationFn: () => api.evaluationStrategy(repoId!),
+    onSuccess: (d) => {
+      const next = { ...commands }
+      for (const f of [...REQUIRED_COMMANDS, ...OPTIONAL_COMMANDS]) {
+        if (d.commands[f] !== undefined) next[f] = d.commands[f] ?? ''
+      }
+      setCommands(next)
+      if (d.commands.test_framework) setFramework(d.commands.test_framework)
+      setSetupOpen(true)
+      // The analyzer already ran the baseline, so the commands are verified —
+      // but leave the user free to re-run it after any edit of their own.
+      setBaselineStale(false)
+      setError(null)
+    },
+    onError: fail,
+  })
+  const strategy = decideStrategy.data
+
   const describeTask = useMutation({
     mutationFn: () => api.createTask({ repository_id: repoId!, title, prompt }),
     onSuccess: ({ id }) => {
@@ -764,6 +788,20 @@ export default function NewRun() {
                 <Box sx={{ mb: 1.5 }}>
                   <Button
                     size="small"
+                    variant="contained"
+                    disabled={decideStrategy.isPending || !repoId}
+                    onClick={() => decideStrategy.mutate()}
+                    startIcon={
+                      decideStrategy.isPending ? <CircularProgress size={12} /> : null
+                    }
+                    sx={{ mr: 1 }}
+                  >
+                    {decideStrategy.isPending
+                      ? 'Analysing and verifying…'
+                      : 'Analyse & verify'}
+                  </Button>
+                  <Button
+                    size="small"
                     variant="outlined"
                     disabled={askAi.isPending || !repoId}
                     onClick={() => askAi.mutate()}
@@ -776,9 +814,66 @@ export default function NewRun() {
                   <Typography
                     sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.faint, mt: 0.75 }}
                   >
-                    sends file names, README, manifests and CI config to OpenRouter · costs 1 of
-                    ~50 daily requests · secrets (.env, keys) are never included
+                    both send file names, README, manifests and CI config to the model provider ·
+                    secrets (.env, keys) are never included · “Analyse &amp; verify” also RUNS the
+                    commands in a container to prove they produce a score
                   </Typography>
+
+                  {strategy && (
+                    <Box
+                      sx={{
+                        mt: 1.25,
+                        p: 1.25,
+                        border: '1px solid',
+                        // An unscoreable repo is the finding, not an error —
+                        // but it must not be quietly hopeful either.
+                        borderColor: strategy.scoreable ? C.faint : 'warning.main',
+                        borderRadius: 1,
+                      }}
+                    >
+                      <Typography
+                        sx={{
+                          fontFamily: fonts.mono,
+                          fontSize: '0.72rem',
+                          color: strategy.scoreable ? C.text : 'warning.main',
+                        }}
+                      >
+                        {strategy.strategy.replace('_', ' ')}
+                        {strategy.scoreable ? '' : ' — this repo cannot be scored'}
+                      </Typography>
+                      <Typography
+                        sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.dim, mt: 0.5 }}
+                      >
+                        {strategy.meaning}
+                      </Typography>
+                      {/* The ladder, so a verdict can be argued with rather
+                          than merely accepted. */}
+                      {strategy.attempts.map((a) => (
+                        <Typography
+                          key={`${a.rung}-${a.strategy}`}
+                          sx={{
+                            fontFamily: fonts.mono,
+                            fontSize: '0.64rem',
+                            color: a.ok ? C.text : C.faint,
+                            mt: 0.4,
+                          }}
+                        >
+                          {a.ok ? '✓' : '✗'} rung {a.rung} {a.strategy.replace('_', ' ')} — {a.reason}
+                        </Typography>
+                      ))}
+                      <Typography
+                        sx={{
+                          fontFamily: fonts.mono,
+                          fontSize: '0.62rem',
+                          color: C.faint,
+                          mt: 0.75,
+                        }}
+                      >
+                        decided by {strategy.provenance.provider}/{strategy.provenance.model} ·
+                        verified by running the commands, not by asking
+                      </Typography>
+                    </Box>
+                  )}
                   {suggestion && (
                     <Typography
                       sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.dim, mt: 0.75 }}

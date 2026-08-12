@@ -82,6 +82,27 @@ export interface Suggestion {
   files_read: string[]
 }
 
+/** A strategy VERIFIED by execution, unlike Suggestion which is advisory.
+ *  `attempts` is the rung-by-rung record of what was tried and why it failed,
+ *  so an `unbenchmarkable` verdict can be argued with rather than just read. */
+export interface StrategyDecision {
+  strategy: 'commit_tests' | 'repo_tests' | 'build_only' | 'unbenchmarkable'
+  scoreable: boolean
+  meaning: string
+  warn: boolean
+  commands: Record<string, string | null>
+  provenance: { provider: string; model: string }
+  rationale: Record<string, string>
+  attempts: {
+    rung: number
+    strategy: string
+    ok: boolean
+    reason: string
+    evidence: Record<string, unknown>
+  }[]
+  commits: { sha: string; why: string; subject: string; parent: string }[]
+}
+
 export interface MatrixPreview {
   combinations: number
   runs: number
@@ -249,6 +270,12 @@ export const api = {
   // Sends a bounded, secret-free repo digest to the model provider. One
   // request per call — deliberate, never automatic.
   suggest: (id: string) => post<Suggestion>(`/repositories/${id}/suggest`),
+  // Decides HOW the repo can be evaluated and proves it by running a baseline
+  // in a container. Slower than suggest() because it actually executes, which
+  // is the entire point: it answers "can this repo be scored at all" before a
+  // matrix is queued instead of after.
+  evaluationStrategy: (id: string) =>
+    post<StrategyDecision>(`/repositories/${id}/evaluation-strategy`),
   commits: (id: string) => get<Commit[]>(`/repositories/${id}/commits`),
 
   createTask: (body: { repository_id: string; title: string; prompt: string }) =>

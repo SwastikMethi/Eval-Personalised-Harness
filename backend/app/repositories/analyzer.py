@@ -19,11 +19,16 @@ from app.providers.base import ModelProvider
 # can score at all, so a capable model first, then the free tier as a fallback.
 PREFERENCE = ("anthropic", "openai", "openrouter", "nvidia")
 
-DEFAULT_MODELS = {
-    "anthropic": "claude-sonnet-5",
-    "openai": "gpt-5",
-    "openrouter": "cohere/north-mini-code:free",
-    "nvidia": "openai/gpt-oss-120b",
+# Preferences, not assertions. A hardcoded single default was wrong the first
+# time it met a real account: "gpt-5" does not exist there, and a model id
+# invented in source is the same class of error as a fabricated metric. The
+# choice is resolved against the provider's own listing, so an account without
+# the first preference gets the next one instead of a 404 mid-analysis.
+DEFAULT_MODEL_PREFERENCES = {
+    "anthropic": ("claude-opus-5", "claude-sonnet-5"),
+    "openai": ("gpt-5.6-sol", "gpt-5.5", "gpt-4.1"),
+    "openrouter": ("cohere/north-mini-code:free",),
+    "nvidia": ("openai/gpt-oss-120b",),
 }
 
 
@@ -95,5 +100,34 @@ def select_analyzer(settings: Settings, model_id: str | None = None) -> Analyzer
                 "OPENROUTER_API_KEY or NVIDIA_API_KEY in .env to analyse a repository"
             )
 
-    chosen = model_id or settings.analyzer_model or DEFAULT_MODELS[name]
+    # Empty means "resolve against the provider's listing" — see resolve_model.
+    chosen = model_id or settings.analyzer_model or ""
     return Analyzer(provider=_build(name, settings), provider_name=name, model_id=chosen)
+
+
+async def resolve_model(analyzer: Analyzer) -> str:
+    """Settle the analyzer's model against what the account can actually call.
+
+    Verifying costs one listing request and turns "model_not_found" in the
+    middle of an analysis into a clear error before anything is spent.
+    """
+    available = {m.model_id for m in await analyzer.provider.list_models()}
+
+    if analyzer.model_id:
+        if analyzer.model_id not in available:
+            raise AnalyzerUnavailable(
+                f"{analyzer.model_id} is not available on this {analyzer.provider_name} "
+                f"account. Available include: {sorted(available)[:8]}"
+            )
+        return analyzer.model_id
+
+    for candidate in DEFAULT_MODEL_PREFERENCES[analyzer.provider_name]:
+        if candidate in available:
+            analyzer.model_id = candidate
+            return candidate
+
+    raise AnalyzerUnavailable(
+        f"none of the preferred {analyzer.provider_name} models are available on this "
+        f"account ({DEFAULT_MODEL_PREFERENCES[analyzer.provider_name]}). Set ANALYZER_MODEL "
+        f"to one of: {sorted(available)[:8]}"
+    )

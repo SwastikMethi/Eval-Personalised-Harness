@@ -148,6 +148,20 @@ class AnthropicProvider(ModelProvider):
         try:
             async with self._client() as client:
                 resp = await client.post(f"{self._base_url}/messages", json=payload)
+                # Claude 5 rejects `temperature` outright: "`temperature` is
+                # deprecated for this model". Callers ask for temperature=0 to
+                # make analysis reproducible, which is reasonable of them — and
+                # which API accepts what is the provider layer's business, not
+                # theirs. Retry once without it rather than making every caller
+                # learn Anthropic's per-model rules. A 400 costs no tokens.
+                if (
+                    resp.status_code == 400
+                    and "temperature" in payload
+                    and "temperature" in resp.text
+                    and "deprecated" in resp.text
+                ):
+                    payload.pop("temperature")
+                    resp = await client.post(f"{self._base_url}/messages", json=payload)
         except httpx.TimeoutException as exc:
             raise ProviderError(
                 "provider request timed out", ErrorCategory.TIMEOUT, retryable=True

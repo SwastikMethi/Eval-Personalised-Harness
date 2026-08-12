@@ -216,8 +216,67 @@ describe('NewRun wizard', () => {
     mockRepo()
     const user = await reachCombos()
     await user.click(await screen.findByText('review'))
-    expect(await screen.findByText(/sends file names, README, manifests/)).toBeInTheDocument()
+    // Matched on the substance rather than the sentence, so rewording the
+    // copy does not fail a test whose point is that disclosure exists.
+    expect(await screen.findByText(/file names, README, manifests/)).toBeInTheDocument()
     expect(await screen.findByText(/secrets \(.env, keys\) are never included/)).toBeInTheDocument()
+  })
+
+  it('shows the verified strategy, its evidence, and who decided it', async () => {
+    mockRepo()
+    server.use(
+      http.post('/api/v1/repositories/:id/evaluation-strategy', () =>
+        HttpResponse.json({
+          strategy: 'repo_tests',
+          scoreable: true,
+          meaning: "Graded against the repository's own suite",
+          warn: false,
+          commands: { install: 'pip install -r requirements.txt', test: 'pytest -v' },
+          provenance: { provider: 'anthropic', model: 'claude-opus-5' },
+          rationale: {},
+          attempts: [
+            { rung: 1, strategy: 'commit_tests', ok: false, reason: 'no commit adds tests', evidence: {} },
+            { rung: 2, strategy: 'repo_tests', ok: true, reason: '5 test case(s) parsed', evidence: {} },
+          ],
+          commits: [],
+        }),
+      ),
+    )
+    const user = await reachCombos()
+    await user.click(await screen.findByText('review'))
+    await user.click(await screen.findByRole('button', { name: /Analyse & verify/i }))
+
+    // Appears as both the headline verdict and the passing ladder rung.
+    expect((await screen.findAllByText(/repo tests/)).length).toBeGreaterThan(0)
+    // The ladder is shown so a verdict can be argued with, not just accepted.
+    expect(await screen.findByText(/5 test case\(s\) parsed/)).toBeInTheDocument()
+    expect(await screen.findByText(/claude-opus-5/)).toBeInTheDocument()
+  })
+
+  it('says plainly when a repo cannot be scored, before any run is queued', async () => {
+    mockRepo()
+    server.use(
+      http.post('/api/v1/repositories/:id/evaluation-strategy', () =>
+        HttpResponse.json({
+          strategy: 'unbenchmarkable',
+          scoreable: false,
+          meaning: 'No runnable check was found, so patches cannot be verified.',
+          warn: false,
+          commands: { install: 'pip install -r requirements.txt' },
+          provenance: { provider: 'anthropic', model: 'claude-opus-5' },
+          rationale: {},
+          attempts: [
+            { rung: 3, strategy: 'build_only', ok: false, reason: 'no build command', evidence: {} },
+          ],
+          commits: [],
+        }),
+      ),
+    )
+    const user = await reachCombos()
+    await user.click(await screen.findByText('review'))
+    await user.click(await screen.findByRole('button', { name: /Analyse & verify/i }))
+
+    expect(await screen.findByText(/cannot be scored/)).toBeInTheDocument()
   })
 
   it('offers each configured provider and swaps the model list', async () => {

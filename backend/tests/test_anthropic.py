@@ -107,6 +107,62 @@ async def test_api_key_never_appears_in_error_text() -> None:
     assert "sk-ant-supersecret" not in str(exc.value)
 
 
+async def test_temperature_rejection_is_retried_without_it() -> None:
+    """Claude 5 answers `temperature` with a 400. Callers pass temperature=0 to
+    make analysis reproducible; which API accepts what is the provider's
+    business, so it retries once rather than failing the whole analysis."""
+    import json
+
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.read().decode())
+        seen.append(payload)
+        if "temperature" in payload:
+            return httpx.Response(
+                400,
+                json={
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "`temperature` is deprecated for this model.",
+                    },
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "m",
+                "model": MODEL,
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    result = await provider_with(handler).complete(
+        MODEL, [{"role": "user", "content": "x"}], temperature=0.0
+    )
+    assert result.content == "ok"
+    assert len(seen) == 2, "one rejected attempt, one retry"
+    assert "temperature" in seen[0] and "temperature" not in seen[1]
+
+
+async def test_other_400s_are_not_retried() -> None:
+    """The retry is for this one deprecation, not a blanket swallow of 400s."""
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(400, json={"error": {"message": "max_tokens too large"}})
+
+    with pytest.raises(ProviderError):
+        await provider_with(handler).complete(
+            MODEL, [{"role": "user", "content": "x"}], temperature=0.0
+        )
+    assert len(calls) == 1
+
+
 async def test_unknown_capabilities_are_none_not_false() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
