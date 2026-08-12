@@ -35,7 +35,9 @@ export default function AppShell({ children }: { children: ReactNode }) {
   // fails, and the cause is not obvious from a run's error message.
   const provider = useQuery({
     queryKey: ['connection'],
-    queryFn: api.connection,
+    // Wrapped, not passed bare: api.connection takes an optional provider, and
+    // react-query would otherwise hand it a QueryFunctionContext as that arg.
+    queryFn: () => api.connection(),
     retry: false,
     staleTime: 60_000,
   })

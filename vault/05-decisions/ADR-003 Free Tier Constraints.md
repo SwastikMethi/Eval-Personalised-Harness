@@ -39,6 +39,10 @@ An experiment is `tasks × harnesses × models × repetitions`, and each run mak
 - Per-run request consumption must be **visible** before quota is exhausted, not discovered afterwards.
 - A full 36-run matrix is a multi-day exercise. Plan around it; do not try to force it into one session.
 
+## Superseded in part (2026-08-12)
+
+A second provider now exists — see [[ADR-005 Second Provider]]. "Quota sets the schedule" was true while OpenRouter was the only option; with NVIDIA NIM selectable per combination, a matrix can be split across providers or run entirely on the one with headroom. The mechanics below still hold (budgets, backoff, develop-against-`FakeProvider`), because NIM credits are finite too — but the six-day estimate for a 36-run matrix no longer follows.
+
 ## The escape hatch, stated honestly
 
 Roughly **$10 of credits raises the cap to ~1000 requests/day**, turning the full matrix into a single afternoon. This is worth knowing, not a recommendation — the plan assumes it does not happen and works regardless.

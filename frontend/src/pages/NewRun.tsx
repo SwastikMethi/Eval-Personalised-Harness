@@ -76,11 +76,17 @@ export default function NewRun() {
   // this account has no credits, so listing the rest is 400 ways to fail.
   const [showPaid, setShowPaid] = useState(false)
   const [modelFilter, setModelFilter] = useState('')
+  const [provider, setProvider] = useState('openrouter')
 
   const availableHarnesses = useQuery({ queryKey: ['harnesses'], queryFn: api.harnesses })
+  const providers = useQuery({ queryKey: ['providers'], queryFn: api.providers })
+  const activeProvider = providers.data?.find((p) => p.name === provider)
+  // NIM bills credits — nothing there is a free per-token tier, so a
+  // "free only" filter would return an empty list.
+  const freeOnly = activeProvider?.has_free_tier === false ? false : !showPaid
   const availableModels = useQuery({
-    queryKey: ['models', showPaid],
-    queryFn: () => api.models(!showPaid),
+    queryKey: ['models', provider, freeOnly],
+    queryFn: () => api.models(provider, freeOnly),
     staleTime: 300_000,
   })
   const commits = useQuery({
@@ -194,13 +200,13 @@ export default function NewRun() {
       // fails its combination loudly instead of being silently substituted.
       for (const m of models) {
         try {
-          await api.snapshotModel(m)
+          await api.snapshotModel(provider, m)
         } catch {
           /* snapshot is best-effort; pricing just stays unknown */
         }
       }
       const combinations = harnesses.flatMap((h) =>
-        models.map((m) => ({ harness: h, provider: 'openrouter', model_id: m })),
+        models.map((m) => ({ harness: h, provider, model_id: m })),
       )
       return api.createExperiment({
         repository_id: repoId,
@@ -557,7 +563,35 @@ export default function NewRun() {
                   Could not list models — check OPENROUTER_API_KEY in .env.
                 </Alert>
               )}
-              {showPaid && (
+              <ToggleButtonGroup
+                exclusive
+                size="small"
+                value={provider}
+                onChange={(_, v) => {
+                  if (!v) return
+                  setProvider(v)
+                  setModels([]) // ids are provider-specific
+                }}
+                sx={{ mb: 1.5 }}
+              >
+                {(providers.data ?? []).map((p) => (
+                  <ToggleButton key={p.name} value={p.name} disabled={!p.configured}>
+                    {p.name}
+                    {!p.configured && ' · no key'}
+                  </ToggleButton>
+                ))}
+              </ToggleButtonGroup>
+
+              {activeProvider?.has_free_tier === false && (
+                <Alert severity="info" sx={{ mb: 1.5 }}>
+                  {provider} bills credits rather than offering a free per-token tier, so cost is
+                  recorded as $0.00 but is <strong>not</strong> verified the way an OpenRouter
+                  <code> :free</code> model is. Capabilities its listing omits show as
+                  <code> unknown</code>.
+                </Alert>
+              )}
+
+              {showPaid && activeProvider?.has_free_tier !== false && (
                 <Alert severity="warning" sx={{ mb: 1.5 }}>
                   Paid models need OpenRouter credits, and spec §2 puts closed-source models out of
                   scope — this tool benchmarks open-weight stacks. Open-weight-but-paid models
@@ -592,7 +626,13 @@ export default function NewRun() {
                         >
                           {m.context_length ? `${(m.context_length / 1000).toFixed(0)}k ctx` : ''}
                           {m.is_free ? ' · free' : ' · paid'}
-                          {m.supports_tools ? ' · tools' : ' · no tools'}
+                          {/* null is UNKNOWN, not unsupported — the provider
+                              simply does not report it. */}
+                          {m.supports_tools === null
+                            ? ' · tools unknown'
+                            : m.supports_tools
+                              ? ' · tools'
+                              : ' · no tools'}
                         </Typography>
                       </Box>
                     }

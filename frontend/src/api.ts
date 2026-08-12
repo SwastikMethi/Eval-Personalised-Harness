@@ -23,10 +23,17 @@ export interface ModelInfo {
   model_id: string
   display_name: string
   context_length: number | null
-  supports_tools: boolean
+  /** null = UNKNOWN, not unsupported. NIM's listing does not report capabilities. */
+  supports_tools: boolean | null
   is_free: boolean
   /** Moving alias (`~vendor/model`, `-latest`) — never pinnable, excluded by default. */
   is_alias?: boolean
+}
+
+export interface ProviderInfo {
+  name: string
+  configured: boolean
+  has_free_tier: boolean
 }
 
 export interface Analysis {
@@ -219,11 +226,13 @@ export const api = {
   results: (id: string) => get<ExperimentResults>(`/experiments/${id}/results`),
 
   harnesses: () => get<Harness[]>('/harnesses'),
-  models: (freeOnly = true) =>
-    get<ModelInfo[]>(`/providers/openrouter/models?free_only=${freeOnly}`),
-  connection: () => get<{ ok: boolean; latency_ms: number }>('/providers/openrouter/connection'),
-  snapshotModel: (modelId: string) =>
-    post<{ snapshot_id: string }>(`/providers/openrouter/models/${modelId}/snapshot`),
+  providers: () => get<ProviderInfo[]>('/providers'),
+  models: (provider = 'openrouter', freeOnly = true) =>
+    get<ModelInfo[]>(`/providers/${provider}/models?free_only=${freeOnly}`),
+  connection: (provider = 'openrouter') =>
+    get<{ ok: boolean; latency_ms: number }>(`/providers/${provider}/connection`),
+  snapshotModel: (provider: string, modelId: string) =>
+    post<{ snapshot_id: string }>(`/providers/${provider}/models/${modelId}/snapshot`),
 
   addRepository: (body: { name: string; source: string; path_or_url: string }) =>
     post<{ id: string }>('/repositories', body),

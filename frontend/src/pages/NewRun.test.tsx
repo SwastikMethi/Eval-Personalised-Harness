@@ -220,6 +220,37 @@ describe('NewRun wizard', () => {
     expect(await screen.findByText(/secrets \(.env, keys\) are never included/)).toBeInTheDocument()
   })
 
+  it('offers each configured provider and swaps the model list', async () => {
+    mockRepo()
+    const { NIM_MODELS } = await import('../test/server')
+    server.use(
+      http.get('/api/v1/providers/:provider/models', ({ params }) =>
+        HttpResponse.json(params.provider === 'nvidia' ? NIM_MODELS : []),
+      ),
+    )
+    const user = await reachCombos()
+    await user.click(await screen.findByRole('button', { name: /nvidia/ }))
+    expect(await screen.findByText(/deepseek-coder/)).toBeInTheDocument()
+  })
+
+  it('shows unknown capabilities as unknown, never as unsupported', async () => {
+    mockRepo()
+    const { NIM_MODELS } = await import('../test/server')
+    server.use(
+      http.get('/api/v1/providers/:provider/models', ({ params }) =>
+        HttpResponse.json(params.provider === 'nvidia' ? NIM_MODELS : []),
+      ),
+    )
+    const user = await reachCombos()
+    await user.click(await screen.findByRole('button', { name: /nvidia/ }))
+
+    // "no tools" would assert a capability we cannot read from the listing.
+    expect(await screen.findByText(/tools unknown/)).toBeInTheDocument()
+    expect(screen.queryByText(/· no tools/)).not.toBeInTheDocument()
+    // And credit billing must not be dressed up as a verified free tier.
+    expect(await screen.findByText(/bills credits rather than offering a free/)).toBeInTheDocument()
+  })
+
   it('marks the baseline stale after commands are edited', async () => {
     mockRepo()
     const user = await reachCombos()

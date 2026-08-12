@@ -3,14 +3,30 @@ from dataclasses import dataclass
 from typing import Any
 
 
+def is_moving_alias(model_id: str) -> bool:
+    """True for ids that do not name one fixed model.
+
+    `~vendor/model` and `vendor/model-latest` follow a vendor's current
+    release, so pinning one means a rerun can silently measure a different
+    model — the reason `openrouter/free` is banned (spec §4: never silently
+    replace a selected model). Lives here rather than in one provider so the
+    next provider cannot forget the rule.
+    """
+    return model_id.startswith("~") or model_id.endswith("-latest")
+
+
 @dataclass
 class ModelInfo:
     provider: str
     model_id: str
     display_name: str
     context_length: int | None
-    supports_tools: bool
-    supports_structured_output: bool
+    # None means UNKNOWN, not unsupported. OpenRouter publishes
+    # `supported_parameters`; NVIDIA NIM's listing carries only id/owner, so
+    # claiming False there would be inventing a capability report (spec §31:
+    # mark unavailable metrics as null). Preflight (§21) is what resolves it.
+    supports_tools: bool | None
+    supports_structured_output: bool | None
     input_price_per_token: float
     output_price_per_token: float
     is_free: bool

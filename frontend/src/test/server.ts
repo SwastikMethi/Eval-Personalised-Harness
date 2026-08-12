@@ -13,10 +13,16 @@ export const handlers = [
       { name: 'fake', sandboxed: false },
     ]),
   ),
-  http.get('/api/v1/providers/openrouter/connection', () =>
+  http.get('/api/v1/providers', () =>
+    HttpResponse.json([
+      { name: 'openrouter', configured: true, has_free_tier: true },
+      { name: 'nvidia', configured: true, has_free_tier: false },
+    ]),
+  ),
+  http.get('/api/v1/providers/:provider/connection', () =>
     HttpResponse.json({ ok: true, latency_ms: 42 }),
   ),
-  http.get('/api/v1/providers/openrouter/models', () =>
+  http.get('/api/v1/providers/:provider/models', () =>
     HttpResponse.json([
       {
         provider: 'openrouter',
@@ -36,6 +42,18 @@ export const handlers = [
       },
     ]),
   ),
+]
+
+/** A NIM-shaped listing: capabilities absent, so unknown rather than false. */
+export const NIM_MODELS = [
+  {
+    provider: 'nvidia',
+    model_id: 'deepseek-ai/deepseek-coder-6.7b-instruct',
+    display_name: 'deepseek-ai/deepseek-coder-6.7b-instruct',
+    context_length: null,
+    supports_tools: null,
+    is_free: false,
+  },
 ]
 
 export const server = setupServer(...handlers)

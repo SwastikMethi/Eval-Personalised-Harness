@@ -23,29 +23,42 @@ from app.orchestration.recovery import reconcile
 
 
 def _install_provider() -> str:
-    """Point the model proxy at OpenRouter when a key is configured.
+    """Register every provider that has a key; the first becomes the default.
 
-    Without this the proxy keeps its FakeProvider default forever, so a run
-    that looks real never reaches OpenRouter at all — it just gets canned
-    completions. Absent a key we stay on the fake, which is what the test
-    suite and `make demo` rely on.
+    Runs route by their own combination's provider, so several can be live at
+    once. Without any key the proxy keeps its FakeProvider, which is what the
+    test suite and `make demo` rely on — otherwise a run that looks real would
+    never reach a model at all.
     """
-    from app.api.proxy import set_provider
+    from app.api.proxy import register_provider, set_provider
     from app.core.config import settings
 
-    if not settings.openrouter_api_key:
-        return "fake"
-    from app.providers.openrouter import OpenRouterProvider
+    installed: list[str] = []
 
-    set_provider(
-        OpenRouterProvider(
-            api_key=settings.openrouter_api_key,
-            base_url=settings.openrouter_base_url,
-            http_referer=settings.openrouter_http_referer,
-            app_name=settings.openrouter_app_name,
+    if settings.openrouter_api_key:
+        from app.providers.openrouter import OpenRouterProvider
+
+        set_provider(
+            OpenRouterProvider(
+                api_key=settings.openrouter_api_key,
+                base_url=settings.openrouter_base_url,
+                http_referer=settings.openrouter_http_referer,
+                app_name=settings.openrouter_app_name,
+            )
         )
-    )
-    return "openrouter"
+        installed.append("openrouter")
+
+    if settings.nvidia_api_key:
+        from app.providers.nim import NimProvider
+
+        nim = NimProvider(
+            api_key=settings.nvidia_api_key, base_url=settings.nvidia_base_url
+        )
+        # Default only if it is the sole configured provider.
+        (register_provider if installed else set_provider)(nim)
+        installed.append("nvidia")
+
+    return "+".join(installed) or "fake"
 
 
 def create_app(start_worker: bool = True) -> FastAPI:

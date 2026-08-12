@@ -228,4 +228,24 @@ Both original bugs are gone: `pandas` imports (containers) and `src` imports (`p
 
 ---
 
+## 2026-08-12 — NVIDIA NIM as a second provider
+
+**Why.** OpenRouter's ~50 requests/day has gated every milestone in this project. A second provider buys more than the other three ideas on the table combined. Spec §4 already named "any OpenAI-compatible endpoint"; `ModelProvider` was the seam. [[ADR-005 Second Provider]].
+
+**Verified live**: `GET /v1/models` returns 102 models, 49 code-oriented, and needs no key to list.
+
+**The interesting part was what NIM does not tell us.** Its listing carries only `id`/`object`/`created`/`owned_by` — no pricing, no context length, no `supported_parameters`. `ModelInfo.supports_tools` was a plain `bool`, so a NIM model would have had to claim `False`: asserting a model *cannot* use tools when we simply cannot see. That is a fabricated metric, so the shared contract became `bool | None` and the UI renders **`tools unknown`**, never `no tools`. Same reasoning for cost: NIM bills credits, so `is_free` is False and a NIM run does not display "$0.00" the way a genuine `:free` model does.
+
+`is_moving_alias()` moved from `openrouter.py` to `base.py` — an alias is unpinnable for any provider, and a rule living inside one provider is a rule the next one forgets.
+
+**Found while verifying:** an empty key produced `Bearer `, which httpx rejects client-side with an opaque `LocalProtocolError`. The header is now sent only when a key exists, so keyless listing works (as the API allows) and a real auth failure surfaces as the server's own 401.
+
+**Also caught:** `npm run build` failed where `tsc --noEmit` passed — `api.connection` gained an optional argument and react-query was handing it a `QueryFunctionContext`. Worth remembering that the two typecheck paths are not equivalent.
+
+**Verified.** 9 NIM tests + 2 frontend, all keyless via `MockTransport`: unknowns stay `None`, NIM is never free, 429 maps to `RATE_LIMITED` so existing backoff applies, tools pass through, aliases rejected, and two providers route independently in one experiment. Suite 157 backend + 27 frontend; lint, typecheck, build, demo green.
+
+**Next.** `tools unknown` is the best argument yet for spec §21 **preflight** — settle capability by running the harness once, rather than by trusting listing metadata.
+
+---
+
 <!-- New entries above this line -->

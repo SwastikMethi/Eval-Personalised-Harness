@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     openrouter_http_referer: str = "http://localhost:3000"
     openrouter_app_name: str = "Agent Stack Optimizer"
 
+    # Second provider (spec §4). Headroom against OpenRouter's ~50 free
+    # requests/day, not a replacement — provider is chosen per combination.
+    nvidia_api_key: str = ""
+    nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
+
     # Model used for AI-assisted setup suggestions (one request per press).
     # A code-oriented free model; overridable per request from the UI.
     suggest_model: str = "cohere/north-mini-code:free"

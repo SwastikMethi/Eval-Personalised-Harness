@@ -14,7 +14,13 @@ from typing import Any
 import httpx
 
 from app.core.errors import ErrorCategory
-from app.providers.base import CompletionResult, CompletionUsage, ModelInfo, ModelProvider
+from app.providers.base import (
+    CompletionResult,
+    CompletionUsage,
+    ModelInfo,
+    ModelProvider,
+    is_moving_alias,
+)
 
 
 class ProviderError(Exception):
@@ -52,17 +58,6 @@ def normalize_http_error(status: int, body_snippet: str) -> ProviderError:
         f"provider rejected request ({status}): {snippet}", ErrorCategory.MODEL_PROVIDER,
         retryable=False, status=status,
     )
-
-
-def is_moving_alias(model_id: str) -> bool:
-    """True for ids that do not name one fixed model.
-
-    OpenRouter exposes `~vendor/model` and `vendor/model-latest` aliases that
-    follow the vendor's current release. Pinning one means a rerun can silently
-    measure a different model, which is the same reason `openrouter/free` is
-    banned (spec §4: never silently replace a selected model).
-    """
-    return model_id.startswith("~") or model_id.endswith("-latest")
 
 
 def _estimate_tokens(messages: list[dict[str, Any]], content: str) -> CompletionUsage:

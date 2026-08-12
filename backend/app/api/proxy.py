@@ -65,6 +65,15 @@ def set_provider(provider: ModelProvider) -> None:
     _named_providers[provider.name] = provider
 
 
+def register_provider(provider: ModelProvider) -> None:
+    """Make a provider routable by name without making it the default.
+
+    Runs carry their own provider, so several can be live at once and a single
+    experiment can compare the same model across two of them.
+    """
+    _named_providers[provider.name] = provider
+
+
 def provider_for(name: str) -> ModelProvider:
     return _named_providers.get(name, _provider)
 

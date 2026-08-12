@@ -60,6 +60,7 @@ This is **not a model leaderboard**. It evaluates the complete agent stack.
 - [[ADR-002 Model Selection]] — the three free models
 - [[ADR-003 Free Tier Constraints]] — why quota, not money, sets the schedule
 - [[ADR-004 Backend on Host]] — why the control plane is not containerized
+- [[ADR-005 Second Provider]] — NVIDIA NIM, and what "unknown" must not become
 
 ## Reference
 
