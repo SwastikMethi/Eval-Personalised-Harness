@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.evaluators.parsers import PARSERS, parse_generic
-from app.sandboxes.exec import CommandResult, run_host_command
+from app.sandboxes.exec import CommandResult, Executor, run_host_command
 
 
 @dataclass
@@ -30,14 +30,30 @@ def run_baseline(
     workspace: Path,
     commands: dict[str, str | None],
     test_framework: str | None,
+    execute: Executor = run_host_command,
+    prebuilt_install: CommandResult | None = None,
 ) -> BaselineOutcome:
+    """`execute` runs each command. Production passes a container-backed
+    executor so install and test share one interpreter; unit tests keep the
+    host default and stay fast.
+
+    `prebuilt_install` is the result of installing dependencies at image build
+    time — recorded as the install step so the user sees it, without paying for
+    the install twice.
+    """
     outcome = BaselineOutcome(benchmarkable=True, warn=False)
+
+    if prebuilt_install is not None:
+        outcome.steps["install"] = _record(prebuilt_install)
+        if prebuilt_install.exit_code != 0:
+            outcome.benchmarkable = False
+            return outcome
 
     for step in ("install", "build"):
         cmd = commands.get(step)
-        if not cmd:
+        if not cmd or (step == "install" and prebuilt_install is not None):
             continue
-        result = run_host_command(cmd, workspace)
+        result = execute(cmd, workspace)
         outcome.steps[step] = _record(result)
         if result.exit_code != 0:
             outcome.benchmarkable = False
@@ -45,7 +61,7 @@ def run_baseline(
 
     test_cmd = commands.get("test")
     if test_cmd:
-        result = run_host_command(test_cmd, workspace)
+        result = execute(test_cmd, workspace)
         parser = PARSERS.get(test_framework or "generic", parse_generic)
         report = parser(result)
         outcome.steps["test"] = _record(result) | {
@@ -64,7 +80,7 @@ def run_baseline(
         cmd = commands.get(step)
         if not cmd:
             continue
-        result = run_host_command(cmd, workspace)
+        result = execute(cmd, workspace)
         outcome.steps[step] = _record(result)
         if result.exit_code != 0:
             outcome.warn = True

@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 from app.db.engine import get_session
 from app.models import BaselineResult, Repository, RepositoryAnalysis, RepositoryCommand
 from app.providers.openrouter import ProviderError
-from app.repositories import baseline, detectors, service
+from app.repositories import detectors, service
+from app.sandboxes.runner import run_baseline_in_sandbox
 
 router = APIRouter()
 
@@ -260,18 +261,17 @@ def run_baseline_endpoint(
 
     workdir = Path(tempfile.mkdtemp(prefix="aso-baseline-"))
     snapshot = workdir / "snapshot"
+    command_map = {
+        "install": commands.install,
+        "build": commands.build,
+        "test": commands.test,
+        "lint": commands.lint,
+        "typecheck": commands.typecheck,
+    }
     try:
         service.create_snapshot(root, commit, snapshot)
-        outcome = baseline.run_baseline(
-            snapshot,
-            {
-                "install": commands.install,
-                "build": commands.build,
-                "test": commands.test,
-                "lint": commands.lint,
-                "typecheck": commands.typecheck,
-            },
-            commands.test_framework,
+        outcome = run_baseline_in_sandbox(
+            snapshot, command_map, commands.test_framework, repo_id
         )
     except service.RepositoryError as exc:
         raise HTTPException(422, str(exc)) from exc

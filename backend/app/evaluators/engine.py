@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from app.evaluators.parsers import PARSERS, TestReport, parse_generic
-from app.sandboxes.exec import run_host_command
+from app.sandboxes.exec import Executor, run_host_command
 
 PROHIBITED_PATTERNS = (
     r"(^|/)tests?/",
@@ -100,9 +100,12 @@ def _patch_stats(patch: str) -> dict[str, int]:
 
 
 def _run_tests(
-    workspace: Path, command: str, framework: str | None
+    workspace: Path,
+    command: str,
+    framework: str | None,
+    execute: Executor = run_host_command,
 ) -> tuple[TestReport, dict[str, Any]]:
-    result = run_host_command(command, workspace)
+    result = execute(command, workspace)
     parser = PARSERS.get(framework or "generic", parse_generic)
     report = parser(result)
     return report, {
@@ -131,7 +134,9 @@ def _regressions(
     )
 
 
-def evaluate(context: EvaluationContext, workdir: Path) -> EvaluationOutcome:
+def evaluate(
+    context: EvaluationContext, workdir: Path, execute: Executor = run_host_command
+) -> EvaluationOutcome:
     """Grade a patch. `workdir` is a scratch dir owned by the caller."""
     import shutil
 
@@ -161,7 +166,7 @@ def evaluate(context: EvaluationContext, workdir: Path) -> EvaluationOutcome:
     score_parts: list[float] = []
 
     if build_cmd := context.commands.get("build"):
-        result = run_host_command(build_cmd, workspace)
+        result = execute(build_cmd, workspace)
         ok = result.exit_code == 0
         outcome.results["build"] = {"ok": ok, "exit_code": result.exit_code}
         has_signal = True
@@ -171,7 +176,7 @@ def evaluate(context: EvaluationContext, workdir: Path) -> EvaluationOutcome:
             return outcome
 
     if test_cmd := context.commands.get("test"):
-        report, meta = _run_tests(workspace, test_cmd, context.test_framework)
+        report, meta = _run_tests(workspace, test_cmd, context.test_framework, execute)
         outcome.results["existing_tests"] = meta
         has_signal = has_signal or report.parse_ok or bool(report.cases)
         regressions = _regressions(context.baseline_cases, report.cases)
@@ -187,7 +192,7 @@ def evaluate(context: EvaluationContext, workdir: Path) -> EvaluationOutcome:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content)
         hidden_cmd = context.commands.get("test") or "pytest -v"
-        report, meta = _run_tests(workspace, hidden_cmd, context.test_framework)
+        report, meta = _run_tests(workspace, hidden_cmd, context.test_framework, execute)
         outcome.results["hidden_tests"] = meta
         has_signal = True
         total = max(len(report.cases), 1)
@@ -195,7 +200,7 @@ def evaluate(context: EvaluationContext, workdir: Path) -> EvaluationOutcome:
 
     for step in ("lint", "typecheck"):
         if cmd := context.commands.get(step):
-            result = run_host_command(cmd, workspace)
+            result = execute(cmd, workspace)
             outcome.results[step] = {"ok": result.exit_code == 0}
 
     if not has_signal:

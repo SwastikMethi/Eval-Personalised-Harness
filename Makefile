@@ -42,3 +42,6 @@ demo:
 
 clean-sandboxes:
 	docker ps -aq --filter "label=aso.run_id" | xargs -r docker rm -f
+	docker network ls -q --filter "label=aso.run_id" | xargs -r docker network rm
+	@# Prepared images accumulate one per repo per manifest revision.
+	docker images -q "aso-prepared:*" | xargs -r docker rmi -f

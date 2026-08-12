@@ -306,7 +306,13 @@ class QueueWorker:
             proxy_base = self._proxy_base_url
             if sandboxed:
                 assert self._sandboxes is not None
-                await self._sandboxes.create(run_id, workspace)
+                # Start the agent from an image that already has the repo's
+                # dependencies, so its PREP install is a no-op instead of
+                # minutes repeated for every run in the matrix.
+                image = await asyncio.to_thread(
+                    self._prepared_image, workspace, config, task.repository_id
+                )
+                await self._sandboxes.create(run_id, workspace, image=image)
                 await self._sandboxes.seal(run_id)
                 relay = self._sandboxes.relay_host(run_id)
                 proxy_base = f"http://{relay}:{settings.backend_port}/proxy"
@@ -411,8 +417,9 @@ class QueueWorker:
         """
         from sqlalchemy import select as sa_select
 
-        from app.evaluators.engine import EvaluationContext, evaluate
+        from app.evaluators.engine import EvaluationContext
         from app.models import EvaluationResult
+        from app.sandboxes.runner import evaluate_in_sandbox
 
         with self._sessions() as session:
             task = session.get(BenchmarkTask, task_id)
@@ -444,7 +451,14 @@ class QueueWorker:
                 baseline_cases=[tuple(c) for c in config.get("baseline_cases", [])],
                 hidden_tests=hidden,
             )
-            outcome = evaluate(context, tmp_path)
+            # Containerised: install and the test runner share one interpreter,
+            # and the agent's patch no longer executes on the host.
+            outcome = evaluate_in_sandbox(
+                context,
+                tmp_path,
+                repo_id=task.repository_id,
+                install_cmd=(config.get("commands") or {}).get("install"),
+            )
 
         with self._sessions() as session:
             session.add(
@@ -504,6 +518,18 @@ class QueueWorker:
                 released = True
             if released:
                 session.commit()
+
+    @staticmethod
+    def _prepared_image(workspace: Path, config: dict[str, Any], repo_id: str) -> str | None:
+        """Image with this repo's dependencies baked in, or None for the default."""
+        from app.sandboxes.manager import docker_available
+        from app.sandboxes.prepared import ensure_prepared_image
+
+        install = (config.get("commands") or {}).get("install")
+        if not install or not docker_available():
+            return None
+        image, _ = ensure_prepared_image(workspace, install, repo_id)
+        return image
 
     def _model_prices(self, model_id: str) -> tuple[float, float]:
         """Per-token prices from the pinned snapshot; (0, 0) when unknown."""

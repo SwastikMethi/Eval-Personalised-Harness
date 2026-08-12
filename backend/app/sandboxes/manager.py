@@ -97,6 +97,38 @@ def _docker() -> Any:
     return docker.from_env()
 
 
+def container_kwargs(
+    workspace: Path,
+    run_id: str,
+    limits: "SandboxLimits | None" = None,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Creation flags shared by the agent sandbox and the evaluation sandbox.
+
+    One definition on purpose: if evaluation containers were configured
+    separately they would quietly drift from the agent's hardening, and the
+    weaker of the two is the one that matters.
+    """
+    limits = limits or SandboxLimits()
+    return {
+        "command": "sleep infinity",
+        "detach": True,
+        "user": str(SANDBOX_UID),
+        "working_dir": "/workspace",
+        "volumes": {str(workspace): {"bind": "/workspace", "mode": "rw"}},
+        "environment": {"HOME": "/tmp", **(env or {})},
+        "labels": {RUN_LABEL: run_id},
+        "nano_cpus": int(limits.cpu * 1e9),
+        "mem_limit": f"{limits.memory_mb}m",
+        "pids_limit": limits.pids,
+        "security_opt": ["no-new-privileges"],
+        "cap_drop": ["ALL"],
+        "tmpfs": {"/tmp": "size=512m"},
+        "extra_hosts": {"host.docker.internal": "host-gateway"},
+        "network_mode": "bridge",
+    }
+
+
 class SandboxManager:
     def __init__(self, image: str = "aso-sandbox-python:dev") -> None:
         self._image = image
@@ -110,28 +142,16 @@ class SandboxManager:
         workspace: Path,
         limits: SandboxLimits | None = None,
         env: dict[str, str] | None = None,
+        image: str | None = None,
     ) -> None:
-        limits = limits or SandboxLimits()
+        """`image` overrides the base — the queue passes a prepared image so the
+        agent's PREP dependency install collapses to a no-op."""
 
         def _create() -> Any:
             client = _docker()
             return client.containers.run(
-                self._image,
-                command="sleep infinity",
-                detach=True,
-                user=str(SANDBOX_UID),
-                working_dir="/workspace",
-                volumes={str(workspace): {"bind": "/workspace", "mode": "rw"}},
-                environment={"HOME": "/tmp", **(env or {})},
-                labels={RUN_LABEL: run_id},
-                nano_cpus=int(limits.cpu * 1e9),
-                mem_limit=f"{limits.memory_mb}m",
-                pids_limit=limits.pids,
-                security_opt=["no-new-privileges"],
-                cap_drop=["ALL"],
-                tmpfs={"/tmp": "size=512m"},
-                extra_hosts={"host.docker.internal": "host-gateway"},
-                network_mode="bridge",
+                image or self._image,
+                **container_kwargs(workspace, run_id, limits, env),
             )
 
         self._containers[run_id] = await asyncio.to_thread(_create)

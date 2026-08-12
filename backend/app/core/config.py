@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # Model used for AI-assisted setup suggestions (one request per press).
     # A code-oriented free model; overridable per request from the UI.
     suggest_model: str = "cohere/north-mini-code:free"
+    # Base image for agent sandboxes and for baseline/evaluation containers.
+    # Per-repo "prepared" images are built FROM this with deps pre-installed.
+    eval_image: str = "aso-sandbox-python:dev"
     backend_port: int = 8005
     data_dir: Path = Path("../data")
     database_url: str = "sqlite:///../data/aso.db"
