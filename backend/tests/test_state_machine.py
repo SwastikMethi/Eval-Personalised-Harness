@@ -36,5 +36,19 @@ def test_failed_and_timeout_are_retryable() -> None:
     assert RunState.PENDING in VALID_TRANSITIONS[RunState.TIMED_OUT]
 
 
+def test_evaluating_can_end_in_timeout() -> None:
+    """Every run is evaluated regardless of how the harness ended — a timed-out
+    agent may still have left a partial patch worth grading — so the terminal
+    state is set FROM evaluating. Without this the timeout branch raised
+    "invalid transition" and every slow-provider failure was recorded as a
+    generic harness crash.
+    """
+    run = make_run(RunState.PENDING)
+    for state in (RunState.PREPARING, RunState.RUNNING, RunState.EVALUATING):
+        transition(run, state)
+    transition(run, RunState.TIMED_OUT)
+    assert run.state == RunState.TIMED_OUT
+
+
 def test_rate_limited_requeues() -> None:
     assert RunState.PENDING in VALID_TRANSITIONS[RunState.RATE_LIMITED]

@@ -48,7 +48,12 @@ VALID_TRANSITIONS: dict[RunState, set[RunState]] = {
         RunState.RATE_LIMITED,
     },
     RunState.RATE_LIMITED: {RunState.PENDING, RunState.FAILED, RunState.CANCELLED},
-    RunState.EVALUATING: {RunState.COMPLETED, RunState.FAILED},
+    # TIMED_OUT is reachable from EVALUATING because every run is evaluated
+    # regardless of how the harness ended — a timed-out agent may still have
+    # left a partial patch worth grading. Without it, a harness timeout raised
+    # "invalid transition" and was recorded as a generic harness crash, hiding
+    # every slow-provider failure behind the wrong category.
+    RunState.EVALUATING: {RunState.COMPLETED, RunState.FAILED, RunState.TIMED_OUT},
     RunState.COMPLETED: set(),
     RunState.FAILED: {RunState.PENDING},  # retry
     RunState.CANCELLED: set(),
