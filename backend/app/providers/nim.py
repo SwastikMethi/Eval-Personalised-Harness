@@ -26,6 +26,7 @@ from typing import Any
 
 import httpx
 
+from app.core.config import settings
 from app.core.errors import ErrorCategory
 from app.providers.base import (
     CompletionResult,
@@ -59,7 +60,9 @@ class NimProvider(ModelProvider):
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
-            transport=self._transport, headers=self._headers, timeout=120
+            transport=self._transport,
+            headers=self._headers,
+            timeout=settings.provider_timeout_seconds,
         )
 
     @staticmethod

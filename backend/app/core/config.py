@@ -23,6 +23,14 @@ class Settings(BaseSettings):
     nvidia_api_key: str = ""
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
 
+    # How long to wait for one upstream completion. Reasoning models routinely
+    # think for minutes: measured here, z-ai/glm-5.2 on NIM exceeded 120s on
+    # every request, so a hardcoded 120s client timeout turned a slow model
+    # into 10 consecutive 502s and an agent that retried for 18 minutes without
+    # ever seeing a response. Waiting is cheaper than a retry whose answer we
+    # abandon — that spends the same upstream quota and returns nothing.
+    provider_timeout_seconds: float = 600.0
+
     # Model used for AI-assisted setup suggestions (one request per press).
     # A code-oriented free model; overridable per request from the UI.
     suggest_model: str = "cohere/north-mini-code:free"
