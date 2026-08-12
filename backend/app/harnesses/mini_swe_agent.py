@@ -60,19 +60,28 @@ class MiniSweAgentHarness(HarnessAdapter):
         model = f"openai/{request.model_id}"
 
         # mini re-raises if litellm cannot price the model, which kills the run
-        # after its first successful completion. litellm has no pricing for a
-        # model served through our proxy, so register it explicitly via the
-        # documented LITELLM_MODEL_REGISTRY_PATH hook. Zero is the true cost
-        # for the pinned free variants; the proxy's ModelRequestMetric rows
-        # remain the authoritative spend record either way.
+        # after its FIRST successful completion — the agent then exits 0 having
+        # taken zero steps, so the run was recorded COMPLETED with no patch and
+        # a 0.0 score that measured this wiring rather than the model.
+        #
+        # LitellmModel.query prices with `completion_cost(response)`, so the key
+        # litellm looks up is the model name in the RESPONSE, not the one it was
+        # configured with. Our proxy echoes back `body.model`, which is the bare
+        # id litellm sent after stripping the `openai/` routing prefix. So
+        # registering only "openai/<id>" never matched, and every mini-swe-agent
+        # run died on its first reply. Register both spellings.
         registry = json.dumps(
             {
-                model: {
+                name: {
                     "input_cost_per_token": 0.0,
                     "output_cost_per_token": 0.0,
                     "litellm_provider": "openai",
                     "mode": "chat",
                 }
+                # Cost is 0.0 because the proxy's ModelRequestMetric rows are the
+                # authoritative spend record; litellm only needs *a* price so it
+                # stops raising.
+                for name in dict.fromkeys([request.model_id, model])
             }
         )
         blob = base64.b64encode(registry.encode()).decode()

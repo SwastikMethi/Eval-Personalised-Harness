@@ -60,6 +60,45 @@ def _request(tmp_path: Path) -> HarnessRunRequest:
     )
 
 
+async def test_registry_carries_the_key_litellm_actually_looks_up(tmp_path: Path) -> None:
+    """The defect that made this harness produce nothing at all.
+
+    LitellmModel.query prices with `completion_cost(response)`, so litellm looks
+    up the model name in the RESPONSE. Our proxy echoes back `body.model` — the
+    bare id litellm sent after stripping its own `openai/` routing prefix — so a
+    registry containing only "openai/<id>" never matched. litellm raised, mini
+    re-raised, and the agent exited 0 after ZERO steps: recorded COMPLETED, no
+    patch, score 0.0, measuring this wiring rather than the model.
+    """
+    import base64
+    import json
+
+    class Capturing(KeyedSandbox):
+        def __init__(self) -> None:
+            super().__init__()
+            self.registry: dict[str, object] = {}
+
+        async def exec(self, run_id: str, command: str, timeout_s: int = 600) -> CommandResult:
+            if "base64 -d >" in command and "registry" in command:
+                blob = command.split("printf %s ")[1].split(" |")[0].strip("'\"")
+                self.registry = json.loads(base64.b64decode(blob).decode())
+            return await super().exec(run_id, command, timeout_s)
+
+    sandbox = Capturing()
+    harness = MiniSweAgentHarness(sandbox)  # type: ignore[arg-type]
+    request = _request(tmp_path)
+    await harness.prepare(request)
+    await harness.run(request)
+
+    # The bare id is what comes back in the response and therefore what is
+    # priced; the prefixed one is what litellm was configured with.
+    assert request.model_id in sandbox.registry, "the response's model name must be priceable"
+    assert f"openai/{request.model_id}" in sandbox.registry
+    for entry in sandbox.registry.values():
+        assert entry["litellm_provider"] == "openai"  # type: ignore[index]
+        assert entry["input_cost_per_token"] == 0.0  # type: ignore[index]
+
+
 async def test_prepare_addresses_the_container_by_run_id(tmp_path: Path) -> None:
     sandbox = KeyedSandbox()
     harness = MiniSweAgentHarness(sandbox)  # type: ignore[arg-type]
