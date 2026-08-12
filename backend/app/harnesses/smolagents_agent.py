@@ -152,7 +152,11 @@ class SmolagentsHarness(HarnessAdapter):
         else:
             status = "failed"
             error_type = report.get("error_type") or "harness"
-            error_message = report.get("error_message") or result.stdout[-1000:]
+            # stderr too: the streams are demuxed now, and a crash before the
+            # runner writes its report leaves its only explanation on stderr.
+            error_message = (
+                report.get("error_message") or (result.stdout + result.stderr)[-1000:]
+            )
 
         return HarnessRunResult(
             status=status,

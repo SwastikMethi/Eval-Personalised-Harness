@@ -104,7 +104,9 @@ class MiniSweAgentHarness(HarnessAdapter):
             status, error_type, error_message = "timeout", "timeout", "harness timed out"
         elif result.exit_code != 0:
             status, error_type = "failed", "harness"
-            error_message = result.stdout[-1000:]
+            # Streams are demuxed, and a nonzero exit usually explains itself
+            # on stderr rather than stdout.
+            error_message = (result.stdout + result.stderr)[-1000:]
         else:
             status, error_type, error_message = "completed", None, None
 
@@ -131,6 +133,7 @@ class MiniSweAgentHarness(HarnessAdapter):
                 # Kept even on success: a run that exits 0 having done nothing
                 # is indistinguishable from a good one without it.
                 "stdout_tail": result.stdout[-3000:],
+                "stderr_tail": result.stderr[-3000:],
             },
         )
 

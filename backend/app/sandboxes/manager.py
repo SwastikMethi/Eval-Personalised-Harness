@@ -102,6 +102,38 @@ class SandboxError(Exception):
     pass
 
 
+def _died_message(container: Any, run_id: str, command: str, exc: Exception) -> str:
+    """Explain a failed exec by asking the container why it is gone.
+
+    Docker answers a exec-on-dead-container with a bare 409 Conflict quoting a
+    64-char container id, which surfaced to the user verbatim and says nothing
+    about the cause. The exit code does: 137 with oom_killed means the agent
+    hit the memory limit, which is a config problem, not a harness bug.
+    """
+    state: dict[str, Any] = {}
+    try:
+        container.reload()
+        state = container.attrs.get("State", {})
+    except Exception:  # noqa: BLE001 - the container may be gone entirely
+        pass
+    if not state:
+        return (
+            f"sandbox container for {run_id} is gone and its state could not be read "
+            f"(command: {command[:120]}). Underlying error: {exc}"
+        )
+    oom = state.get("OOMKilled")
+    detail = f"status={state.get('Status')} exit_code={state.get('ExitCode')} oom_killed={oom}"
+    hint = (
+        " — the container exceeded its memory limit; raise SandboxLimits.memory_mb"
+        if oom
+        else ""
+    )
+    return (
+        f"sandbox container for {run_id} exited before the command could run "
+        f"({detail}){hint}. Command: {command[:120]}"
+    )
+
+
 def _docker() -> Any:
     import docker
 
@@ -256,21 +288,29 @@ class SandboxManager:
         container = self._containers[run_id]
         start = time.monotonic()
 
-        def _exec() -> tuple[int, bytes]:
-            result = container.exec_run(
-                ["timeout", str(timeout_s), "sh", "-lc", command],
-                workdir=workdir,
-                demux=False,
-            )
-            return result.exit_code, result.output or b""
+        def _exec() -> tuple[int, bytes, bytes]:
+            try:
+                result = container.exec_run(
+                    ["timeout", str(timeout_s), "sh", "-lc", command],
+                    workdir=workdir,
+                    demux=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - re-raised with diagnosis below
+                raise SandboxError(_died_message(container, run_id, command, exc)) from exc
+            out, err = result.output or (b"", b"")
+            return result.exit_code, out or b"", err or b""
 
-        exit_code, output = await asyncio.to_thread(_exec)
-        truncated = len(output) > MAX_OUTPUT_BYTES
+        exit_code, out, err = await asyncio.to_thread(_exec)
+        truncated = len(out) > MAX_OUTPUT_BYTES or len(err) > MAX_OUTPUT_BYTES
         return CommandResult(
             command=command,
             exit_code=exit_code,
-            stdout=output[:MAX_OUTPUT_BYTES].decode(errors="replace"),
-            stderr="",
+            stdout=out[:MAX_OUTPUT_BYTES].decode(errors="replace"),
+            # Demuxed, so stdout stays parseable. Merging the streams meant
+            # every `cat result.json` could be corrupted by a stray warning,
+            # and stderr — where smolagents writes its reasoning — was
+            # hardcoded empty, leaving completed runs with no transcript.
+            stderr=err[:MAX_OUTPUT_BYTES].decode(errors="replace"),
             duration_s=time.monotonic() - start,
             truncated=truncated,
             timed_out=exit_code == 124,  # GNU timeout convention
