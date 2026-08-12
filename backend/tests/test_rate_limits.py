@@ -254,6 +254,25 @@ def test_slow_provider_reads_as_timeout_not_a_broken_harness() -> None:
     )
 
 
+def test_a_completed_run_that_never_reached_the_model_is_not_success() -> None:
+    """Observed: mini-swe-agent exited 0 with 10 upstream requests, ALL failed,
+    zero agent steps and no patch — and the run was recorded COMPLETED. A run
+    that never ran must not count as a working combination."""
+    from types import SimpleNamespace
+
+    worker = QueueWorker(SessionLocal, proxy_base_url="http://test/proxy")
+    nothing = SimpleNamespace(status="completed", agent_steps=0, patch=None)
+
+    assert worker._did_no_work(nothing, {"requests": 10, "succeeded": 0})
+
+    # An empty patch after real work is a legitimate result, not a failure.
+    tried = SimpleNamespace(status="completed", agent_steps=7, patch=None)
+    assert not worker._did_no_work(tried, {"requests": 6, "succeeded": 6})
+    # A patch is proof of work even if the step count is unreported.
+    patched = SimpleNamespace(status="completed", agent_steps=0, patch="diff --git a b")
+    assert not worker._did_no_work(patched, {"requests": 0, "succeeded": 0})
+
+
 def test_unreachable_proxy_is_not_reported_as_a_slow_provider() -> None:
     """The shape that produced a fabricated latency claim.
 

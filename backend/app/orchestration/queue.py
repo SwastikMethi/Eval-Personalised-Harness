@@ -371,7 +371,21 @@ class QueueWorker:
             with self._sessions() as session:
                 run = session.get(BenchmarkRun, run_id)
                 assert run is not None
-                if result.status == "completed":
+                if result.status == "completed" and self._did_no_work(result, usage):
+                    # A harness can exit 0 having achieved nothing: one run
+                    # reported completed with 10 upstream requests, ALL failed,
+                    # zero agent steps and no patch. Recording that as success
+                    # would count a run that never ran as a working combination
+                    # and corrupt the reliability statistics it feeds.
+                    transition(run, RunState.FAILED)
+                    run.error_category = ErrorCategory.HARNESS
+                    run.error_message = (
+                        "harness reported success but did no work: "
+                        f"{usage.get('succeeded')} of {usage.get('requests')} upstream "
+                        f"requests returned 200, {result.agent_steps} agent steps, no patch. "
+                        + (result.error_message or "")[:800]
+                    )
+                elif result.status == "completed":
                     transition(run, RunState.COMPLETED)
                     run.error_category = ErrorCategory.NONE
                 elif result.status == "timeout":
@@ -545,6 +559,22 @@ class QueueWorker:
             return None
         image, _ = ensure_prepared_image(workspace, install, repo_id)
         return image
+
+    @staticmethod
+    def _did_no_work(result: Any, usage: dict[str, Any]) -> bool:
+        """A 'completed' run that cannot have accomplished anything.
+
+        Deliberately narrow: no upstream request ever returned 200, AND the
+        agent took no steps, AND there is no patch. An empty patch is a
+        legitimate benchmark result, so a run that genuinely tried and failed
+        to solve the task still counts as completed — this only catches the
+        case where the model was never reached at all.
+        """
+        if usage.get("requests") and (usage.get("succeeded") or 0) > 0:
+            return False
+        if result.patch and result.patch.strip():
+            return False
+        return not (result.agent_steps or 0)
 
     @staticmethod
     def _looks_like_provider_timeout(result: Any, usage: dict[str, Any]) -> bool:
