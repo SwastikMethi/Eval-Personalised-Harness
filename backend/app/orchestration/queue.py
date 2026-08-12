@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.proxy import issue_run_token, revoke_run_token, run_usage
@@ -82,6 +82,11 @@ RATE_LIMIT_BACKOFF_S = (30.0, 120.0, 600.0)
 # slower than the provider's gateway fails the same way every time, and each
 # attempt cost ~5 minutes and real credits when measured on NIM.
 PROVIDER_ERROR_MAX_ATTEMPTS = 2
+# How long a budget-exhausted run may go without a model call before the worker
+# ends it. Comfortably longer than the slowest observed single call (~302s is a
+# gateway timeout, but a live call has run to ~65s) so a slow model is never
+# mistaken for a stalled one.
+BUDGET_STALL_GRACE_S = 90.0
 # A sealed agent cannot reach host.docker.internal — an `internal: true`
 # network has no route to the host gateway either. It reaches the proxy through
 # a per-run relay that straddles both networks; see SandboxManager.seal().
@@ -202,6 +207,7 @@ class QueueWorker:
     async def _loop(self) -> None:
         log.info("queue worker started", extra={"event_type": "worker_start"})
         while not self._stopping.is_set():
+            await self._end_stalled_budget_runs()
             claimed = None if self.paused else self._claim_next()
             if claimed is None:
                 try:
@@ -221,6 +227,69 @@ class QueueWorker:
                 await task
             except asyncio.CancelledError:
                 pass
+
+    def _stalled_budget_runs(self, now: datetime) -> list[str]:
+        """RUNNING runs whose budget is spent and whose model calls stopped.
+
+        Pure query so it can be tested without a worker or containers.
+        """
+        from app.api.proxy import run_usage
+
+        stalled: list[str] = []
+        with self._sessions() as session:
+            running = session.scalars(
+                select(BenchmarkRun).where(BenchmarkRun.state == RunState.RUNNING)
+            ).all()
+            for run in running:
+                usage = run_usage(run.id)
+                if not usage.get("budget_exhausted"):
+                    continue
+                last = session.scalar(
+                    select(func.max(ModelRequestMetric.created_at)).where(
+                        ModelRequestMetric.run_id == run.id
+                    )
+                )
+                reference = last or run.started_at
+                if reference is None:
+                    continue
+                # A slow model is still a live run: only silence counts.
+                if (now - reference).total_seconds() >= BUDGET_STALL_GRACE_S:
+                    stalled.append(run.id)
+        return stalled
+
+    async def _end_stalled_budget_runs(self) -> None:
+        """Backstop for a harness that retries a terminal 429.
+
+        Step 1 makes budget exhaustion explicit on the wire, but that relies on
+        every harness cooperating — one did not, and held a container for the
+        full 1800s timeout after spending its budget in 45 seconds. A run ended
+        here is FAILED(budget_exceeded), never TIMED_OUT: it stopped because it
+        ran out of allowance, and scoring that as slowness would be wrong.
+        """
+        for run_id in self._stalled_budget_runs(datetime.now(UTC).replace(tzinfo=None)):
+            log.warning(
+                "ending run whose budget is spent and whose model calls stopped",
+                extra={"run_id": run_id, "event_type": "budget_stall"},
+            )
+            if self._sandboxes is not None:
+                await self._sandboxes.kill(run_id)
+            if task := self._active.get(run_id):
+                task.cancel()
+            with self._sessions() as session:
+                run = session.get(BenchmarkRun, run_id)
+                if run is None or RunState(run.state) is not RunState.RUNNING:
+                    continue
+                transition(run, RunState.FAILED)
+                run.error_category = ErrorCategory.BUDGET_EXCEEDED
+                run.error_message = (
+                    "request budget spent; the harness kept retrying a terminal 429 "
+                    "instead of stopping, so the run was ended rather than held "
+                    "until its timeout"
+                )
+                run.completed_at = datetime.now(UTC)
+                self._event(session, run_id, "budget_exhausted", {})
+                self._settle_experiment(session, run_id)
+                session.commit()
 
     def _claim_next(self) -> str | None:
         self._release_rate_limited()
@@ -393,7 +462,10 @@ class QueueWorker:
                 and not (usage.get("succeeded") or 0)
             ):
                 detail = usage.get("provider_error_detail") or "upstream error"
-                if self._park_for_retry(
+                # A 404 ("not enabled for this account") is final. Parking it
+                # would rebuild a container twice to be told the same thing.
+                retryable = usage.get("provider_error_retryable") is not False
+                if retryable and self._park_for_retry(
                     run_id,
                     usage,
                     event_type="provider_error",
@@ -447,13 +519,19 @@ class QueueWorker:
                     # unusable on this provider" rather than "something broke".
                     transition(run, RunState.FAILED)
                     run.error_category = ErrorCategory.MODEL_PROVIDER
+                    detail = usage.get("provider_error_detail") or "upstream error"
                     run.error_message = (
-                        "provider failed on every attempt "
-                        f"({usage.get('provider_error_detail') or 'upstream error'}) after "
-                        f"{PROVIDER_ERROR_MAX_ATTEMPTS} retries — the model likely exceeds "
-                        "the provider's own gateway timeout. "
-                        + (result.error_message or "")[:800]
-                    )
+                        # Say which it was: a permanent rejection was never
+                        # retried, and claiming otherwise misreports the cost.
+                        f"provider rejected this model permanently ({detail}) — "
+                        "it is not usable on this account or provider. "
+                        if usage.get("provider_error_retryable") is False
+                        else (
+                            f"provider failed on every attempt ({detail}) after "
+                            f"{PROVIDER_ERROR_MAX_ATTEMPTS} retries — the model likely "
+                            "exceeds the provider's own gateway timeout. "
+                        )
+                    ) + (result.error_message or "")[:800]
                 elif self._looks_like_provider_timeout(result, usage):
                     # Every request succeeded upstream, yet the harness reported
                     # a generation failure: the provider was slower than the

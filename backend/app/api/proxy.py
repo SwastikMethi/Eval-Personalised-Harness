@@ -52,6 +52,14 @@ class RunToken:
     # harness bug.
     provider_error: bool = False
     provider_error_detail: str = ""
+    # False for a rejection that will never succeed (404 model not enabled for
+    # the account, 400 bad request). Retrying those costs a container build to
+    # be told the same thing again.
+    provider_error_retryable: bool = True
+    # Every call that left this process, including the ones that returned
+    # nothing. `requests` counts only usable answers, so the difference is
+    # where provider flakiness shows up instead of being hidden by the refund.
+    attempted: int = 0
     # Which provider serves THIS run. A run declares its provider in its
     # combination, so a fake combination stays on the fake provider even when a
     # real OpenRouter key is configured — otherwise the zero-cost path becomes
@@ -132,13 +140,37 @@ def run_usage(run_id: str) -> dict[str, Any]:
         "cost_usd": round(entry.cost_usd, 6),
         "rate_limited": entry.rate_limited,
         "provider_error": entry.provider_error,
+        "provider_error_retryable": entry.provider_error_retryable,
         "provider_error_detail": entry.provider_error_detail,
+        # Attempts include calls that returned nothing; `requests` does not.
+        # Both are reported so a refund never hides provider flakiness.
+        "attempted": entry.attempted,
         "budget_exhausted": entry.requests >= entry.max_requests,
     }
 
 
 def revoke_run_token(run_id: str) -> None:
     _active_tokens.pop(run_id, None)
+
+
+# A run's budget ending and a provider throttling us both arrive as 429, and a
+# harness cannot tell them apart: it backs off and retries, so a run that had
+# simply spent its allowance held a container until the 1800s timeout and was
+# then recorded as a TIMEOUT. Efficiency is 15% of the score, so an orderly
+# stop must not be scored as slowness.
+#
+# The status stays 429 because harnesses already understand it; the marker is
+# what says "never, for this run" rather than "later".
+TERMINAL_HEADER = "X-ASO-Terminal"
+BUDGET_EXHAUSTED = "budget_exhausted"
+
+
+def _budget_exhausted(detail: str) -> HTTPException:
+    return HTTPException(
+        429,
+        f"{detail} — terminal for this run, do not retry",
+        headers={TERMINAL_HEADER: BUDGET_EXHAUSTED},
+    )
 
 
 def _authorize(authorization: str, model_id: str) -> RunToken:
@@ -150,14 +182,15 @@ def _authorize(authorization: str, model_id: str) -> RunToken:
             if entry.model_id != model_id:
                 raise HTTPException(403, "model not pinned for this run")
             if entry.requests >= entry.max_requests:
-                raise HTTPException(429, "run request budget exceeded")
+                raise _budget_exhausted("run request budget exceeded")
             if entry.max_input_tokens and entry.input_tokens >= entry.max_input_tokens:
-                raise HTTPException(429, "run input-token budget exceeded")
+                raise _budget_exhausted("run input-token budget exceeded")
             if entry.max_output_tokens and entry.output_tokens >= entry.max_output_tokens:
-                raise HTTPException(429, "run output-token budget exceeded")
+                raise _budget_exhausted("run output-token budget exceeded")
             if entry.max_cost_usd and entry.cost_usd >= entry.max_cost_usd:
-                raise HTTPException(429, "run spend ceiling exceeded")
+                raise _budget_exhausted("run spend ceiling exceeded")
             entry.requests += 1
+            entry.attempted += 1
             return entry
     raise HTTPException(401, "invalid or expired run token")
 
@@ -215,18 +248,28 @@ async def chat_completions(
     except ProviderError as exc:
         latency = int((time.monotonic() - start) * 1000)
         _record_metric(entry, latency, None, exc.status or 502, {"error": str(exc)})
+        # Refund the request: the agent got nothing it could use, and charging
+        # for it means a model behind a flaky gateway is given fewer steps than
+        # one on a healthy provider — our infrastructure changing the
+        # measurement. Measured: deepseek-v4 lost 2 of 8 steps to 504s.
+        # The refund is bounded elsewhere and cannot become free spend: the
+        # metric row above is already written, the spend and token ceilings are
+        # untouched, and provider errors are retried a capped number of times.
+        entry.requests = max(0, entry.requests - 1)
         if exc.category is ErrorCategory.RATE_LIMITED:
             # Remembered on the run token so the orchestrator can distinguish
             # "provider throttled us" from "the harness broke" after the fact,
             # without parsing harness error strings.
             entry.rate_limited = True
             raise HTTPException(429, f"provider error [{exc.category}]: {exc}") from exc
-        if exc.retryable:
-            # Same contract as rate_limited above. Without this a 504 from a
-            # model slower than the provider's own gateway was indistinguishable
-            # from a broken harness, so the run died terminally and the failure
-            # was booked against the harness.
+        if exc.category is ErrorCategory.MODEL_PROVIDER:
+            # Every provider rejection, not only the retryable ones. A 404
+            # ("model not enabled for this account") carried no marker at all,
+            # so it fell through to HARNESS — booking the provider's refusal
+            # against whichever harness happened to be running, in the very
+            # statistic this product exists to produce.
             entry.provider_error = True
+            entry.provider_error_retryable = exc.retryable
             entry.provider_error_detail = f"{exc.status or 502} after {latency}ms"
         raise HTTPException(502, f"provider error [{exc.category}]: {exc}") from exc
     latency = int((time.monotonic() - start) * 1000)

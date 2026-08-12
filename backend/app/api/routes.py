@@ -174,11 +174,31 @@ def preview_matrix(body: PreviewIn) -> dict[str, Any]:
 
 
 @router.post("/experiments")
-def create_experiment(
+async def create_experiment(
     body: ExperimentIn, session: Session = Depends(get_session)
 ) -> dict[str, Any]:
     if session.get(Repository, body.repository_id) is None:
         raise HTTPException(404, "repository not found")
+
+    # Preflight (spec §21): prove every model can actually be called before
+    # writing any runs. A provider's catalog is not an entitlement list —
+    # deepseek-coder listed fine and then 404'd on its first request, after a
+    # workspace, an image, a container and a seal had all been paid for.
+    from app.api.proxy import provider_for
+    from app.providers import preflight
+
+    probes = await preflight.check_combinations(body.combinations, provider_for)
+    if unusable := [p for p in probes if not p.ok]:
+        # Refuse the whole experiment rather than queue a matrix with holes:
+        # a partially-created experiment that dies on cell 3 is harder to
+        # reason about than one that was never created.
+        raise HTTPException(
+            422,
+            {
+                "message": "these model(s) cannot be used and no runs were created",
+                "unusable": [{"combination": p.label, "reason": p.detail} for p in unusable],
+            },
+        )
     # Explicit request values win over derived ones so a caller can override.
     config = {**derive_config(session, body.repository_id), **body.config}
     exp = Experiment(
