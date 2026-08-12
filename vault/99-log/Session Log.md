@@ -248,4 +248,22 @@ Both original bugs are gone: `pandas` imports (containers) and `src` imports (`p
 
 ---
 
+## 2026-08-12 — End-to-end flow documented, and why the runs were failing
+
+**Why.** Asked which stage uses what and why, with no single note answering it — [[System Overview]] covers components, [[Run Lifecycle]] covers states, but nothing walked the path from *"here is my repo"* to *"use this stack"*. [[End-to-End Flow]] now does, naming the technology at each of the twelve stages and the reason for it. Versions were read from `pyproject.toml`, `package.json` and the sandbox `Dockerfile` rather than recalled.
+
+**The stack story worth remembering:** one FastAPI process, one SQLite file, and Docker. What is *absent* is the design — no Redis, no Celery, no Postgres, no Kubernetes — because a single-user local tool must start with `make dev` and be debuggable by reading one process.
+
+**Diagnosis in the same pass.** Across 41 real runs: 13 COMPLETED, 22 FAILED. The failures were **not** the models or the agents — every run that got a clean shot succeeded, and `nvidia/openai/gpt-oss-120b` produced both real patches (41/42 requests, 21s median). Failures grouped as: 8× relay severing sockets at 10s, 7× the 120s provider timeout, 3× containers dying mid-run, 2× the loopback bind, 2× an illegal `EVALUATING → TIMED_OUT`, 1× `z-ai/glm-5.2` exceeding NIM's ~300s gateway (0/12 requests — a genuine stack-level incompatibility, not a bug).
+
+**Why it looked systemic** was attribution: `_run_guarded` filed *every* exception as `HARNESS`, so containers Docker killed and networks that vanished were recorded as harness crashes. Harness reliability is the metric that decides the recommendation, so this made it a measure of Docker's mood — mini-swe-agent looked unreliable largely for that reason. Sandbox faults now map to `SETUP`.
+
+**A false message cost real time.** Both adapters raised `"<dep> missing in sandbox image"` on *any* non-zero probe exit, so a dying container reported a missing dependency. The image installs both harnesses and both import cleanly — verified directly in the base and prepared images. Absence is now claimed only when the output says so.
+
+**Self-inflicted, worth recording:** running the test suite beside a live batch destroyed all 8 of its runs. Container-creating tests live in three files, not the one obvious file, and excluding them by filename got it wrong. They carry a `docker` marker now — use `pytest -m "not docker"` while a run is in flight.
+
+**Next.** A repo with a runnable test suite. `Web_Scraper` and `Ai-Web-Scraper` produce patches but can never be scored — every run ends `INSUFFICIENT_EVALUATION_SIGNAL`, which is correct behaviour and also a dead end for ranking.
+
+---
+
 <!-- New entries above this line -->

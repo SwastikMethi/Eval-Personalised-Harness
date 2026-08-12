@@ -20,7 +20,7 @@ This is **not a model leaderboard**. It evaluates the complete agent stack.
 |---|---|
 | Understand the product | [[Product Goal]] · [[Spec Scope]] |
 | Know what actually works today | [[Implemented]] · [[Known Defects]] |
-| Understand the system | [[System Overview]] · [[Run Lifecycle]] |
+| Understand the system | [[System Overview]] · [[End-to-End Flow]] · [[Run Lifecycle]] |
 | Understand the safety model | [[Leakage Prevention]] · [[Model Proxy]] · [[Sandbox]] |
 | Know what to build next | [[Roadmap]] · [[Milestones]] |
 | Know why something is the way it is | [[ADR-001 Harness Choice]] · [[ADR-002 Model Selection]] · [[ADR-003 Free Tier Constraints]] · [[ADR-004 Backend on Host]] |
@@ -36,6 +36,7 @@ This is **not a model leaderboard**. It evaluates the complete agent stack.
 ## Architecture
 
 - [[System Overview]] — components and how they connect
+- [[End-to-End Flow]] — every stage from repo to recommendation, and the tech behind each
 - [[Run Lifecycle]] — the 9-state machine, crash recovery
 - [[Leakage Prevention]] — **the core invariant**; historical replay is worthless without it
 - [[Model Proxy]] — run tokens, model pinning, budgets
