@@ -21,10 +21,11 @@ synchronous and must never block the event loop (eng review Tension 5).
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.core.config import settings
 from app.sandboxes.exec import MAX_OUTPUT_BYTES, CommandResult
 
 log = logging.getLogger(__name__)
@@ -93,7 +94,9 @@ while True:
 @dataclass
 class SandboxLimits:
     cpu: float = 2.0
-    memory_mb: int = 4096
+    # From settings so it can be tuned without a code change, and so the
+    # capacity guard and the container both read one number.
+    memory_mb: int = field(default_factory=lambda: settings.sandbox_memory_mb)
     pids: int = 256
     timeout_s: int = 1800
 

@@ -110,5 +110,34 @@ def experiment_results(
             "resource efficiency currently mirrors execution efficiency — container "
             "CPU/memory is collected but not yet persisted, so its 5% weight adds "
             "no independent signal",
+            *_parallel_caveat(session, experiment_id),
         ],
     }
+
+
+def _parallel_caveat(session: Session, experiment_id: str) -> list[str]:
+    """Say so when durations were measured against competing runs.
+
+    Named precisely: parallel runs share CPU, so only DURATION-derived numbers
+    (execution efficiency, 15% of the score) become less comparable. Correctness,
+    reliability and token counts are unaffected, and a caveat implying otherwise
+    would cast false doubt on the scores it describes.
+    """
+    combos = session.scalars(
+        select(ExperimentCombination.id).where(
+            ExperimentCombination.experiment_id == experiment_id
+        )
+    ).all()
+    if not combos:
+        return []
+    runs = session.scalars(
+        select(BenchmarkRun).where(BenchmarkRun.combination_id.in_(list(combos)))
+    ).all()
+    peak = max((int((r.result or {}).get("concurrency") or 1) for r in runs), default=1)
+    if peak <= 1:
+        return []
+    return [
+        f"durations were measured with up to {peak} runs executing in parallel, so "
+        "execution-efficiency comparisons are less reliable than a serial matrix; "
+        "correctness, reliability and token counts are unaffected"
+    ]

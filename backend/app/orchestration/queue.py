@@ -144,7 +144,12 @@ class QueueWorker:
         self._sessions = session_factory
         self._proxy_base_url = proxy_base_url
         self._poll_interval = poll_interval
-        self._semaphore = asyncio.Semaphore(concurrency or settings.queue_concurrency)
+        # Clamped to what the Docker VM can hold: a concurrency it cannot hold
+        # does not queue, it overcommits and the kernel kills containers.
+        from app.sandboxes.capacity import effective_concurrency
+
+        self._concurrency = effective_concurrency(concurrency or settings.queue_concurrency)
+        self._semaphore = asyncio.Semaphore(self._concurrency)
         self._sandboxes = sandbox_manager
         self._task: asyncio.Task[None] | None = None
         self._active: dict[str, asyncio.Task[None]] = {}
@@ -357,6 +362,7 @@ class QueueWorker:
                 "commands_executed": None,
                 "evaluation_signal": evaluation.get("signal"),
                 "score": evaluation.get("score"),
+                "concurrency": max(len(self._active), 1),
                 "usage": usage,
                 "harness_meta": {"ended_by": "budget_watchdog"},
             }
@@ -433,6 +439,10 @@ class QueueWorker:
             session.commit()
 
     async def _execute(self, run_id: str) -> None:
+        # Sampled at the start and again at the end, because a run that begins
+        # alone may be joined later — the higher number is the honest one to
+        # attach to its duration.
+        started_concurrency = max(len(self._active), 1)
         with self._sessions() as session:
             run = session.get(BenchmarkRun, run_id)
             assert run is not None
@@ -559,10 +569,23 @@ class QueueWorker:
             patch_produced = bool(result.patch and result.patch.strip())
             if patch_produced:
                 self._store_patch(run_id, result.patch or "")
+
+            # Release the agent's sandbox BEFORE grading. Its patch is already
+            # extracted and evaluation deliberately works from a fresh snapshot,
+            # so the agent container is dead weight from here — but it was held
+            # until the `finally`, which meant two containers each permitted
+            # SandboxLimits.memory_mb coexisted. On a 7.65 GiB Docker VM with a
+            # 4 GiB limit that overcommitted the VM, and runs were killed with
+            # exit 137 / oom_killed=False (a VM-level kernel kill, not a cgroup
+            # limit). One run lost 28 successful model calls that way.
+            if sandboxed and self._sandboxes is not None:
+                await self._sandboxes.cleanup(run_id)
+
             evaluation = await asyncio.to_thread(
                 self._evaluate, run_id, task_id, result.patch, config
             )
 
+            peak_concurrency = max(started_concurrency, len(self._active))
             with self._sessions() as session:
                 run = session.get(BenchmarkRun, run_id)
                 assert run is not None
@@ -635,6 +658,11 @@ class QueueWorker:
                     "commands_executed": result.commands_executed,
                     "evaluation_signal": evaluation.get("signal"),
                     "score": evaluation.get("score"),
+                    # How many runs were executing alongside this one. Recorded
+                    # because parallelism makes DURATIONS noisier — the runs
+                    # compete for CPU — and execution efficiency is 15% of the
+                    # score. The results caveat is derived from this.
+                    "concurrency": peak_concurrency,
                     # Quota burn must be visible before it runs out, not after.
                     "usage": usage,
                     # Harness telemetry (spec §14). Without it a run that exits
