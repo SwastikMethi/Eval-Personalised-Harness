@@ -87,6 +87,32 @@ async def test_each_pair_is_probed_once_however_many_runs_use_it() -> None:
     assert provider.calls == ["a", "b"]
 
 
+async def test_distinct_models_are_probed_concurrently() -> None:
+    """Serially, a 2-model matrix cost the sum of both probes — gpt-oss-120b
+    measured 21s, so Start sat dead for ~40s. Wall time must be the slowest
+    probe, not the total."""
+    import asyncio
+    import time
+
+    DELAY = 0.25
+
+    class Slow(Recording):
+        async def complete(self, model_id: str, *a: Any, **k: Any) -> CompletionResult:
+            self.calls.append(model_id)
+            await asyncio.sleep(DELAY)
+            return await Recording.complete(self, model_id, *a, **k)
+
+    provider = Slow()
+    combos = [combo("nvidia", f"m{i}") for i in range(4)]
+
+    start = time.monotonic()
+    results = await preflight.check_combinations(combos, lambda _n: provider)
+    elapsed = time.monotonic() - start
+
+    assert len(results) == 4
+    assert elapsed < DELAY * 3, f"probes ran serially: {elapsed:.2f}s for 4 x {DELAY}s"
+
+
 async def test_a_repeat_submission_uses_the_cache() -> None:
     provider = Recording()
     for _ in range(3):
@@ -102,7 +128,49 @@ async def test_throttling_does_not_condemn_a_model() -> None:
     )
     [result] = await preflight.check_combinations([combo("nvidia", "a")], lambda _n: provider)
     assert result.ok
-    assert "rate limited" in result.detail
+    assert "rate limited" in result.warning
+
+
+async def test_a_gateway_timeout_does_not_condemn_a_working_model() -> None:
+    """deepseek-v4-flash completed seven calls in one run and periodically 504s
+    at NIM's ~302s gateway limit. Treating that transient as "unusable" would
+    delete a working combination from the comparison."""
+    provider = Recording(
+        ProviderError(
+            "provider error (504): ", ErrorCategory.MODEL_PROVIDER, retryable=True, status=504
+        )
+    )
+    [result] = await preflight.check_combinations([combo("nvidia", "slow")], lambda _n: provider)
+
+    assert result.ok, "a retryable upstream error is not an entitlement problem"
+    assert "504" in result.warning
+
+
+async def test_a_slow_model_is_usable_with_a_warning_not_a_refusal() -> None:
+    """The probe must bound itself: without that, Start hung for minutes on a
+    slow model and then wrongly refused it."""
+    import asyncio
+    import time
+
+    class TooSlow(Recording):
+        async def complete(self, *a: Any, **k: Any) -> CompletionResult:
+            await asyncio.sleep(60)
+            raise AssertionError("should have been cut off")
+
+    original = preflight.PROBE_TIMEOUT_S
+    preflight.PROBE_TIMEOUT_S = 0.25
+    try:
+        start = time.monotonic()
+        [result] = await preflight.check_combinations(
+            [combo("nvidia", "sluggish")], lambda _n: TooSlow()
+        )
+        elapsed = time.monotonic() - start
+    finally:
+        preflight.PROBE_TIMEOUT_S = original
+
+    assert result.ok, "slow is not broken"
+    assert "slow" in result.warning
+    assert elapsed < 5, f"probe did not bound itself: {elapsed:.1f}s"
 
 
 async def test_preflight_never_crashes_experiment_creation() -> None:

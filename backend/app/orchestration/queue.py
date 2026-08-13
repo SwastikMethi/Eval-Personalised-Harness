@@ -271,25 +271,98 @@ class QueueWorker:
                 "ending run whose budget is spent and whose model calls stopped",
                 extra={"run_id": run_id, "event_type": "budget_stall"},
             )
-            if self._sandboxes is not None:
-                await self._sandboxes.kill(run_id)
-            if task := self._active.get(run_id):
-                task.cancel()
-            with self._sessions() as session:
-                run = session.get(BenchmarkRun, run_id)
-                if run is None or RunState(run.state) is not RunState.RUNNING:
-                    continue
+            await self._end_budget_run(run_id)
+
+    async def _end_budget_run(self, run_id: str) -> None:
+        """End a spent-budget run WITHOUT throwing away what it achieved.
+
+        The first version killed the container and marked the run FAILED with an
+        empty result. A real run then lost 8 successful model calls of work: no
+        patch, no usage, no score — indistinguishable from an agent that did
+        nothing. At a 40-request budget that is half an hour of the user's
+        credits discarded.
+
+        So the patch is extracted while the container is still alive, graded
+        exactly as a normal run would be, and the outcome recorded. Running out
+        of budget with a working patch is a COMPLETED run, not a failure.
+        """
+        with self._sessions() as session:
+            run = session.get(BenchmarkRun, run_id)
+            if run is None or RunState(run.state) is not RunState.RUNNING:
+                return
+            combo = session.get(ExperimentCombination, run.combination_id)
+            experiment = session.get(Experiment, combo.experiment_id) if combo else None
+            task_id = combo.task_id if combo else None
+            config = dict(experiment.config) if experiment else {}
+
+        # Salvage BEFORE anything is killed: this is the agent's work.
+        patch: str | None = None
+        if self._sandboxes is not None:
+            try:
+                extracted = await self._sandboxes.exec(
+                    run_id, "git add -A && git diff --cached", timeout_s=120
+                )
+                patch = extracted.stdout if extracted.exit_code == 0 else None
+            except Exception:  # noqa: BLE001 - the container may already be gone
+                log.warning("could not extract a patch before ending", extra={"run_id": run_id})
+
+        usage = self._persisted_usage(run_id, run_usage(run_id))
+        if task := self._active.get(run_id):
+            task.cancel()
+
+        patch_produced = bool(patch and patch.strip())
+        if patch_produced:
+            self._store_patch(run_id, patch or "")
+        evaluation: dict[str, Any] = {"signal": None, "score": None}
+        if task_id and patch_produced:
+            # Graded on a fresh snapshot, as always — the agent's container is
+            # irrelevant to evaluation and is about to be cleaned up anyway.
+            try:
+                evaluation = await asyncio.to_thread(
+                    self._evaluate, run_id, task_id, patch, config
+                )
+            except Exception:  # noqa: BLE001 - a grading failure must not lose the run
+                log.exception("evaluation failed for a budget-ended run",
+                              extra={"run_id": run_id})
+
+        with self._sessions() as session:
+            run = session.get(BenchmarkRun, run_id)
+            if run is None or RunState(run.state) is not RunState.RUNNING:
+                return
+            transition(run, RunState.EVALUATING)
+            if patch_produced:
+                transition(run, RunState.COMPLETED)
+                run.error_category = ErrorCategory.NONE
+                run.error_message = None
+            else:
                 transition(run, RunState.FAILED)
                 run.error_category = ErrorCategory.BUDGET_EXCEEDED
                 run.error_message = (
-                    "request budget spent; the harness kept retrying a terminal 429 "
-                    "instead of stopping, so the run was ended rather than held "
-                    "until its timeout"
+                    "request budget spent before a patch was produced; the harness kept "
+                    "retrying a terminal 429 instead of stopping, so the run was ended "
+                    "rather than held until its timeout"
                 )
-                run.completed_at = datetime.now(UTC)
-                self._event(session, run_id, "budget_exhausted", {})
-                self._settle_experiment(session, run_id)
-                session.commit()
+            run.completed_at = datetime.now(UTC)
+            run.result = {
+                "status": "completed" if patch_produced else "failed",
+                "patch_produced": patch_produced,
+                "final_message": None,
+                # The harness never returned, so its own counters are unknown —
+                # null, never a fabricated zero. The proxy metrics below are the
+                # authoritative record of what was actually spent.
+                "input_tokens": None,
+                "output_tokens": None,
+                "model_requests": None,
+                "agent_steps": None,
+                "commands_executed": None,
+                "evaluation_signal": evaluation.get("signal"),
+                "score": evaluation.get("score"),
+                "usage": usage,
+                "harness_meta": {"ended_by": "budget_watchdog"},
+            }
+            self._event(session, run_id, "budget_exhausted", {"patch_produced": patch_produced})
+            self._settle_experiment(session, run_id)
+            session.commit()
 
     def _claim_next(self) -> str | None:
         self._release_rate_limited()

@@ -98,6 +98,77 @@ def test_a_run_with_budget_left_is_never_ended() -> None:
     proxy.revoke_run_token(run_id)
 
 
+class SandboxWithPatch:
+    """Stands in for the live container, which still holds the agent's work."""
+
+    def __init__(self, patch: str = "") -> None:
+        self.patch = patch
+        self.killed = False
+
+    async def exec(self, run_id: str, command: str, timeout_s: int = 600):  # type: ignore[no-untyped-def]
+        from app.sandboxes.exec import CommandResult
+
+        stdout = self.patch if "git diff --cached" in command else ""
+        return CommandResult(command=command, exit_code=0, stdout=stdout, stderr="", duration_s=0.1)
+
+    async def kill(self, run_id: str) -> None:
+        self.killed = True
+
+    async def cleanup(self, run_id: str) -> None: ...
+
+
+async def test_a_spent_budget_keeps_the_patch_the_agent_produced(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The defect this replaces: the watchdog killed the container and stored an
+    empty result, so a real run lost 8 successful model calls of work — no
+    patch, no usage, no score, indistinguishable from an agent that did nothing.
+    At a 40-request budget that is half an hour of credits discarded."""
+    run_id = _make_run(RunState.RUNNING)
+    proxy.issue_run_token(run_id, MODEL, max_requests=1)
+    proxy._active_tokens[run_id].requests = 1
+    metric_at(run_id, datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=600))
+
+    patch = "diff --git a/app.py b/app.py\n+fixed\n"
+    w = QueueWorker(SessionLocal, proxy_base_url="http://test/proxy",
+                    sandbox_manager=SandboxWithPatch(patch))
+    # Grading runs in a container in production; here we only care that the
+    # watchdog asks for it and records what it returns.
+    monkeypatch.setattr(
+        QueueWorker, "_evaluate", lambda *a, **k: {"signal": "ok", "score": 0.75}
+    )
+
+    await w._end_budget_run(run_id)
+
+    with SessionLocal() as session:
+        run = session.get(BenchmarkRun, run_id)
+        assert run is not None
+        assert RunState(run.state) is RunState.COMPLETED, "a patch means the run achieved something"
+        assert run.result["patch_produced"] is True
+        assert run.result["score"] == 0.75
+        assert run.result["usage"]["requests"] >= 1, "what was spent must be recorded"
+        assert run.result["agent_steps"] is None, "unknown, never a fabricated zero"
+    proxy.revoke_run_token(run_id)
+
+
+async def test_no_patch_still_fails_as_budget_exceeded(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    run_id = _make_run(RunState.RUNNING)
+    proxy.issue_run_token(run_id, MODEL, max_requests=1)
+    proxy._active_tokens[run_id].requests = 1
+    metric_at(run_id, datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=600))
+
+    w = QueueWorker(SessionLocal, proxy_base_url="http://test/proxy",
+                    sandbox_manager=SandboxWithPatch(""))  # agent wrote nothing
+    await w._end_budget_run(run_id)
+
+    with SessionLocal() as session:
+        run = session.get(BenchmarkRun, run_id)
+        assert run is not None
+        assert RunState(run.state) is RunState.FAILED
+        assert run.error_category == ErrorCategory.BUDGET_EXCEEDED
+        assert run.result["patch_produced"] is False
+        assert run.result["usage"], "spend is recorded even when nothing was achieved"
+    proxy.revoke_run_token(run_id)
+
+
 async def test_ending_a_stalled_run_reports_budget_not_timeout() -> None:
     """TIMED_OUT would feed the efficiency score a slowness that never happened."""
     run_id = _make_run(RunState.RUNNING)

@@ -192,12 +192,14 @@ async def create_experiment(
         # Refuse the whole experiment rather than queue a matrix with holes:
         # a partially-created experiment that dies on cell 3 is harder to
         # reason about than one that was never created.
+        # `detail` must be a STRING: the API client renders the backend's
+        # message only when it is one, so an object here reached the user as a
+        # bare "422 Unprocessable Entity" with the model name and the provider's
+        # explanation silently discarded.
+        lines = "; ".join(f"{p.label} — {p.detail}" for p in unusable)
         raise HTTPException(
             422,
-            {
-                "message": "these model(s) cannot be used and no runs were created",
-                "unusable": [{"combination": p.label, "reason": p.detail} for p in unusable],
-            },
+            f"cannot use {len(unusable)} model(s), so no runs were created: {lines}",
         )
     # Explicit request values win over derived ones so a caller can override.
     config = {**derive_config(session, body.repository_id), **body.config}

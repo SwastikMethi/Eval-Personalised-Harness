@@ -213,6 +213,41 @@ export interface ExperimentStatus {
   runs: { total: number; by_state: Record<string, number> }
 }
 
+/** Read a FastAPI `detail` whatever shape it arrives in.
+ *
+ *  It was previously used only when it was a string, so anything structured was
+ *  discarded and the user saw "422 Unprocessable Entity" while the actual
+ *  reason — which model, and the provider's own words — sat unread in the
+ *  response body. FastAPI itself returns a LIST for validation errors, so this
+ *  hid those too. */
+export function describeDetail(detail: unknown): string | null {
+  if (!detail) return null
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    // Validation errors: [{loc, msg, type}, ...]
+    const parts = detail
+      .map((d) =>
+        typeof d === 'string'
+          ? d
+          : [(d as { loc?: unknown[] })?.loc?.join('.'), (d as { msg?: string })?.msg]
+              .filter(Boolean)
+              .join(': '),
+      )
+      .filter(Boolean)
+    return parts.length ? parts.join('; ') : null
+  }
+  if (typeof detail === 'object') {
+    const obj = detail as { message?: string; unusable?: { combination?: string; reason?: string }[] }
+    const head = obj.message ?? ''
+    const items = (obj.unusable ?? [])
+      .map((u) => [u.combination, u.reason].filter(Boolean).join(' — '))
+      .filter(Boolean)
+    const joined = [head, ...items].filter(Boolean).join(': ')
+    return joined || JSON.stringify(detail)
+  }
+  return String(detail)
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     ...init,
@@ -224,7 +259,8 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     let detail = `${res.status} ${res.statusText}`
     try {
       const body = await res.json()
-      if (body?.detail) detail = typeof body.detail === 'string' ? body.detail : detail
+      const explained = describeDetail(body?.detail)
+      if (explained) detail = explained
     } catch {
       /* non-JSON error body */
     }

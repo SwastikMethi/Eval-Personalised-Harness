@@ -1064,8 +1064,29 @@ export default function NewRun() {
               onClick={() => launch.mutate()}
               startIcon={launch.isPending ? <CircularProgress size={14} /> : null}
             >
-              {launch.isPending ? 'Starting…' : `Start ${runs} run${runs === 1 ? '' : 's'}`}
+              {/* Naming the step matters: creation first verifies every model
+                  can actually be called, which takes as long as one model call.
+                  Unlabelled, that read as a hang. */}
+              {launch.isPending
+                ? 'Verifying models…'
+                : `Start ${runs} run${runs === 1 ? '' : 's'}`}
             </Button>
+            {launch.isPending && (
+              <Typography
+                sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.faint, mt: 0.75 }}
+              >
+                checking each model answers on this account before queueing anything
+              </Typography>
+            )}
+            {launch.isError && (
+              // Shown here, next to the selection that caused it, rather than
+              // only as a toast that scrolls away from the models to change.
+              <Typography
+                sx={{ fontFamily: fonts.mono, fontSize: '0.7rem', color: C.warn, mt: 0.75 }}
+              >
+                {(launch.error as Error).message}
+              </Typography>
+            )}
             {/* Every blocker, not just the first — hiding the rest makes the
                 button feel like it never unlocks. */}
             {blockers.map((reason) => (

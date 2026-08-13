@@ -28,6 +28,38 @@ os.environ["ANTHROPIC_API_KEY"] = ""
 os.environ["OPENAI_API_KEY"] = ""
 
 
+# The REAL database, not the throwaway one this suite runs against: the test
+# DATABASE_URL above points at a temp file that can never contain a live run.
+LIVE_DB = Path(__file__).resolve().parents[2] / "data" / "aso.db"
+LIVE_STATES = ("PENDING", "PREPARING", "RUNNING", "EVALUATING")
+
+
+def active_run(db_path: Path) -> tuple[str, str] | None:
+    """(id, state) of a benchmark run in flight, or None.
+
+    Opened read-only and never created: a missing database means there is no
+    backend to disturb. Any read problem returns None rather than blocking the
+    suite — this guard protects a run, it must not become a way to fail CI.
+    """
+    import sqlite3
+
+    if not db_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        try:
+            placeholders = ",".join("?" * len(LIVE_STATES))
+            row = conn.execute(
+                f"SELECT id, state FROM benchmark_runs WHERE state IN ({placeholders}) LIMIT 1",
+                LIVE_STATES,
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return (row[0], row[1]) if row else None
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _schema() -> Iterator[None]:
     """Migrate the test database once, up front.
@@ -41,6 +73,29 @@ def _schema() -> Iterator[None]:
 
     ensure_schema()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _never_disturb_a_live_run(request: pytest.FixtureRequest) -> None:
+    """Skip container-creating tests while a benchmark run is in flight.
+
+    Twice now this suite has destroyed a user's run: it churns enough Docker
+    containers to put the daemon under pressure, and the kernel kills whatever
+    it likes — including the live run's agent and relay, which then reports a
+    sandbox failure that had nothing to do with the model or the repo.
+
+    The `docker` marker exists so those tests can be deselected, and relying on
+    whoever types the command to remember is what failed. This makes it
+    automatic: the protection holds no matter how pytest is invoked.
+    """
+    if request.node.get_closest_marker("docker") is None:
+        return
+
+    if (active := active_run(LIVE_DB)) is not None:
+        pytest.skip(
+            f"a benchmark run is active ({active[0][:12]}, {active[1]}); container tests "
+            "put Docker under pressure and have killed live runs twice"
+        )
 
 
 @pytest.fixture(autouse=True)

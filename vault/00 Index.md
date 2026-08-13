@@ -22,7 +22,7 @@ This is **not a model leaderboard**. It evaluates the complete agent stack.
 | Know what actually works today | [[Implemented]] · [[Known Defects]] |
 | Understand the system | [[System Overview]] · [[End-to-End Flow]] · [[Run Lifecycle]] |
 | Understand the safety model | [[Leakage Prevention]] · [[Model Proxy]] · [[Sandbox]] |
-| Know what to build next | [[Roadmap]] · [[Milestones]] |
+| Know what to build next | [[Roadmap]] · [[Milestones]] · [[UI Rebuild]] |
 | Know why something is the way it is | [[ADR-001 Harness Choice]] · [[ADR-002 Model Selection]] · [[ADR-003 Free Tier Constraints]] · [[ADR-004 Backend on Host]] |
 | Find a file in the codebase | [[Codebase Map]] |
 | Run something | [[Make Targets]] |
@@ -54,6 +54,7 @@ This is **not a model leaderboard**. It evaluates the complete agent stack.
 
 - [[Roadmap]] — Phases 0–11
 - [[Milestones]] — Milestone A (6-run smoke) and B (scaled matrix)
+- [[UI Rebuild]] — 3D shell, agent-led setup, live agent telemetry, KPI comparison
 
 ## Decisions
 

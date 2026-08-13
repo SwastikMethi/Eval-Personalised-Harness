@@ -15,6 +15,7 @@ briefly — because a preflight that costs real money is one people turn off, an
 then the late failures come back.
 """
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -29,12 +30,24 @@ CACHE_TTL_S = 900.0
 _cache: dict[tuple[str, str], tuple[float, "ProbeResult"]] = {}
 
 
+# A one-token probe should be quick. deepseek-v4-flash takes 72-218s per call
+# and NIM's gateway gives up around 302s, so without our own bound, pressing
+# Start could hang for minutes and then wrongly refuse a model that works.
+# Exceeding this means "slow", never "broken".
+PROBE_TIMEOUT_S = 25.0
+
+
 @dataclass(frozen=True)
 class ProbeResult:
     provider: str
     model_id: str
     ok: bool
     detail: str = ""
+    # Usable, with something the user should know — "slow", or a transient
+    # upstream error. Availability is not a binary: deepseek-v4-flash works and
+    # is slow, and refusing it would remove a legitimate competitor from the
+    # comparison on our infrastructure's terms.
+    warning: str = ""
 
     @property
     def label(self) -> str:
@@ -64,23 +77,38 @@ async def probe(
         return cached[1]
 
     try:
-        await provider.complete(
-            model_id,
-            [{"role": "user", "content": "ok"}],
-            max_tokens=1,
-            temperature=0.0,
+        await asyncio.wait_for(
+            provider.complete(
+                model_id,
+                [{"role": "user", "content": "ok"}],
+                max_tokens=1,
+                temperature=0.0,
+            ),
+            timeout=PROBE_TIMEOUT_S,
         )
         result = ProbeResult(requested, model_id, True)
+    except TimeoutError:
+        # Slow is not broken. deepseek-v4-flash needs 72-218s per call and
+        # completed seven of them in one run; refusing it here would delete a
+        # working combination from the comparison.
+        result = ProbeResult(
+            requested,
+            model_id,
+            True,
+            warning=(
+                f"slow: no answer to a one-token prompt within {PROBE_TIMEOUT_S:.0f}s"
+            ),
+        )
     except ProviderError as exc:
-        # A rate limit means the model exists and we are simply being
-        # throttled; refusing the experiment for that would be wrong, and the
-        # queue already parks and retries throttled runs.
-        from app.core.errors import ErrorCategory
-
-        if exc.category is ErrorCategory.RATE_LIMITED:
-            result = ProbeResult(requested, model_id, True, "rate limited during preflight")
-        else:
+        # Only a rejection that will never succeed disqualifies a model. A 404
+        # ("not enabled for this account") is final; a 429 or a 5xx is not, and
+        # the queue already parks and retries those.
+        if not exc.retryable:
             result = ProbeResult(requested, model_id, False, str(exc)[:300])
+        else:
+            result = ProbeResult(
+                requested, model_id, True, warning=f"transient upstream error: {exc}"[:200]
+            )
     except Exception as exc:  # noqa: BLE001 - never let preflight itself crash creation
         result = ProbeResult(requested, model_id, False, f"{type(exc).__name__}: {exc}"[:300])
 
@@ -97,11 +125,19 @@ async def check_combinations(
     probing per run would make preflight cost more than the thing it protects.
     """
     seen: set[tuple[str, str]] = set()
-    results: list[ProbeResult] = []
+    unique: list[tuple[str, str]] = []
     for combo in combinations:
         key = (combo.provider, combo.model_id)
-        if key in seen:
-            continue
-        seen.add(key)
-        results.append(await probe(provider_for(combo.provider), combo.model_id, combo.provider))
-    return results
+        if key not in seen:
+            seen.add(key)
+            unique.append(key)
+
+    # Concurrently, because these were awaited one after another and each probe
+    # costs whatever the model costs — gpt-oss-120b measured 21s, so a two-model
+    # matrix meant ~40s of a dead Start button. Wall time is now the slowest
+    # single probe rather than their sum.
+    return list(
+        await asyncio.gather(
+            *(probe(provider_for(name), model_id, name) for name, model_id in unique)
+        )
+    )
