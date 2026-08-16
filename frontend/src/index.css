@@ -1,0 +1,123 @@
+/*
+ * Global baseline.
+ *
+ * This replaces MUI's <CssBaseline>. It is deliberately small: a reset, the
+ * page ground, and the handful of things that genuinely cannot be expressed as
+ * inline styles on a component (selection, scrollbars, autofill, and the
+ * reduced-motion kill switch).
+ *
+ * Colours are duplicated from design/tokens.ts as CSS custom properties because
+ * a stylesheet cannot import TypeScript. They must be kept in step — tokens.ts
+ * remains the source of truth and anything new belongs there first.
+ */
+
+:root {
+  --bg: #0a0b0d;
+  --surface: #111316;
+  --raised: #171a1e;
+  --line: #23272c;
+  --line-soft: #1a1d21;
+  --text: #e7e9eb;
+  --dim: #8a9199;
+  --faint: #565d65;
+  --live: #4cc9e8;
+
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Archivo, -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3,
+h4,
+p,
+figure {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+code,
+pre {
+  font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+::selection {
+  background: rgba(76, 201, 232, 0.28);
+}
+
+/* Thin, dark scrollbars — a bright default one is jarring against #0A0B0D. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 100px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--faint);
+  background-clip: content-box;
+}
+
+/* Chrome's autofill paints an opaque near-white block over dark inputs. */
+input:-webkit-autofill,
+input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--text);
+  -webkit-box-shadow: 0 0 0 1000px var(--raised) inset;
+  caret-color: var(--text);
+}
+
+/*
+ * Reduced motion REMOVES movement rather than slowing it. A long slow
+ * animation is worse for a motion-sensitive reader than an instant change.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

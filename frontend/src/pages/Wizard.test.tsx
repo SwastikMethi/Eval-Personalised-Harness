@@ -1,7 +1,7 @@
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
-import NewRun from './NewRun'
+import Wizard from './Wizard'
 import { renderScreen } from '../test/render'
 import { http, HttpResponse, server } from '../test/server'
 
@@ -64,10 +64,17 @@ function mockRepo(over: { analysis?: unknown; baseline?: unknown } = {}) {
   )
 }
 
-/** Repo → tick a commit → land on the combos step. */
+/**
+ * Repo → tick a commit → land on the Agent stacks step.
+ *
+ * The wizard used to put harnesses, models, the matrix and launch on one step.
+ * They are now two ("which stacks compete" and "what exactly will happen"), so
+ * tests about stacks stop here and tests about the matrix continue with
+ * reachReview(). The assertions themselves are unchanged.
+ */
 async function reachCombos() {
   const user = userEvent.setup()
-  renderScreen(<NewRun />)
+  renderScreen(<Wizard />)
   await user.type(screen.getByPlaceholderText(/Projects\/your-repo/), '/tmp/repo')
   await user.click(screen.getByRole('button', { name: /Analyze repository/ }))
   await user.click(await screen.findByLabelText(/Fix median/))
@@ -75,7 +82,16 @@ async function reachCombos() {
   return user
 }
 
-describe('NewRun wizard', () => {
+/** …and on through Agent stacks to Review, where the matrix and launch live. */
+async function reachReview() {
+  const user = await reachCombos()
+  await user.click(await screen.findByLabelText(/mini-swe-agent/))
+  await user.click(await screen.findByLabelText(/gpt-oss-20b/))
+  await user.click(await screen.findByRole('button', { name: /^Continue$/ }))
+  return user
+}
+
+describe('Setup wizard', () => {
   it('reaches the combos step without ever asking for build or typecheck', async () => {
     mockRepo()
     await reachCombos()
@@ -88,7 +104,7 @@ describe('NewRun wizard', () => {
 
   it('keeps setup collapsed when nothing needs attention', async () => {
     mockRepo()
-    await reachCombos()
+    await reachReview()
     expect(await screen.findByText(/baseline passed/)).toBeInTheDocument()
     // Collapsed: the editable commands are not reachable until asked for.
     expect(screen.queryByLabelText('build (optional)')).not.toBeInTheDocument()
@@ -96,7 +112,7 @@ describe('NewRun wizard', () => {
 
   it('marks optional commands as optional once setup is opened', async () => {
     mockRepo()
-    const user = await reachCombos()
+    const user = await reachReview()
     await user.click(await screen.findByText('review'))
     for (const field of ['install', 'build', 'lint', 'typecheck']) {
       expect(await screen.findByLabelText(`${field} (optional)`)).toBeInTheDocument()
@@ -108,7 +124,7 @@ describe('NewRun wizard', () => {
     mockRepo({
       analysis: { ...ANALYSIS, commands: { test: null, test_framework: null } },
     })
-    await reachCombos()
+    await reachReview()
 
     // Opened itself — the user did not have to go looking.
     expect(await screen.findByLabelText('build (optional)')).toBeInTheDocument()
@@ -117,16 +133,20 @@ describe('NewRun wizard', () => {
 
   it('blocks starting when the baseline could not establish a signal', async () => {
     mockRepo({ baseline: { ...BASELINE, benchmarkable: false } })
-    await reachCombos()
+    await reachReview()
     expect(await screen.findByText(/baseline could not establish a signal/)).toBeInTheDocument()
   })
 
   it('states the reason rather than showing a dead button', async () => {
     mockRepo()
     await reachCombos()
-    const start = await screen.findByRole('button', { name: /Start 0 runs/ })
-    expect(start).toBeDisabled()
-    expect(await screen.findByText('pick at least one harness')).toBeInTheDocument()
+    // Same intent as before, now enforced one step earlier: Review is only
+    // reachable once a stack exists, so the empty-selection case is stated here.
+    const cont = await screen.findByRole('button', { name: /^Continue$/ })
+    expect(cont).toBeDisabled()
+    expect(
+      await screen.findByText('pick at least one harness and one model'),
+    ).toBeInTheDocument()
   })
 
   it('computes the expanded matrix from the selections', async () => {
@@ -135,6 +155,7 @@ describe('NewRun wizard', () => {
     await user.click(await screen.findByLabelText(/mini-swe-agent/))
     await user.click(screen.getByLabelText(/smolagents/))
     await user.click(await screen.findByLabelText(/gpt-oss-20b/))
+    await user.click(await screen.findByRole('button', { name: /^Continue$/ }))
 
     // 2 harnesses × 1 model × 1 task × 1 rep
     expect(await screen.findByRole('button', { name: /Start 2 runs/ })).toBeEnabled()
@@ -142,9 +163,7 @@ describe('NewRun wizard', () => {
 
   it('warns when the matrix needs more requests than a free-tier day', async () => {
     mockRepo()
-    const user = await reachCombos()
-    await user.click(await screen.findByLabelText(/mini-swe-agent/))
-    await user.click(await screen.findByLabelText(/gpt-oss-20b/))
+    const user = await reachReview()
 
     const reps = screen.getByLabelText('repetitions')
     await user.clear(reps)
@@ -171,7 +190,7 @@ describe('NewRun wizard', () => {
       ),
     )
     const user = userEvent.setup()
-    renderScreen(<NewRun />)
+    renderScreen(<Wizard />)
     await user.type(screen.getByPlaceholderText(/Projects\/your-repo/), '/tmp/repo')
     await user.click(screen.getByRole('button', { name: /Analyze repository/ }))
 
@@ -200,7 +219,7 @@ describe('NewRun wizard', () => {
         }),
       ),
     )
-    const user = await reachCombos()
+    const user = await reachReview()
     await user.click(await screen.findByText('review'))
     await user.click(screen.getByRole('button', { name: /Suggest with AI/ }))
 
@@ -214,7 +233,7 @@ describe('NewRun wizard', () => {
 
   it('discloses what the AI button transmits before it is pressed', async () => {
     mockRepo()
-    const user = await reachCombos()
+    const user = await reachReview()
     await user.click(await screen.findByText('review'))
     // Matched on the substance rather than the sentence, so rewording the
     // copy does not fail a test whose point is that disclosure exists.
@@ -242,7 +261,7 @@ describe('NewRun wizard', () => {
         }),
       ),
     )
-    const user = await reachCombos()
+    const user = await reachReview()
     await user.click(await screen.findByText('review'))
     await user.click(await screen.findByRole('button', { name: /Analyse & verify/i }))
 
@@ -272,7 +291,7 @@ describe('NewRun wizard', () => {
         }),
       ),
     )
-    const user = await reachCombos()
+    const user = await reachReview()
     await user.click(await screen.findByText('review'))
     await user.click(await screen.findByRole('button', { name: /Analyse & verify/i }))
 
@@ -312,7 +331,7 @@ describe('NewRun wizard', () => {
 
   it('marks the baseline stale after commands are edited', async () => {
     mockRepo()
-    const user = await reachCombos()
+    const user = await reachReview()
     await user.click(await screen.findByText('review'))
     const test = await screen.findByLabelText('test')
     await user.clear(test)
