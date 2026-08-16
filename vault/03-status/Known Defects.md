@@ -1,12 +1,51 @@
 ---
 tags: [aso/status, aso/defect]
 status: current
-updated: 2026-08-11
+updated: 2026-08-15
 ---
 
 # Known Defects
 
 Defects found by reading code on 2026-08-11. **Each one blocks a real benchmark run.** Index: [[00 Index]].
+
+## 18. Preflight's one-token probe rejects reasoning models 🔴 OPEN (2026-08-14)
+
+`providers/preflight.py::probe` sends `max_tokens=1`. A reasoning model spends its output budget on reasoning before emitting any text, and OpenAI answers with a **400**, not a 200 with `finish_reason="length"`:
+
+```
+gpt-5.6-sol  ok=False  "Could not finish the message because max_tokens or model
+                        output limit was reached. Please try again with higher max_tokens."
+gpt-4.1      ok=True
+```
+
+A 400 is non-retryable, so `probe` marks the model **permanently unusable** and deletes the combination from the experiment. The model is fine — the probe is too small. Same class of mistake as the timeout case the function already guards against ("slow is not broken"): availability is being inferred from a limit of ours, not the vendor's.
+
+Raising the probe budget (16 was enough for every gpt-5 model measured) is a one-line change, but it applies to **every** provider's preflight and so costs marginally more quota per probe under [[ADR-003 Free Tier Constraints]]. Left open pending that call.
+
+**Confirmed again, elsewhere, 2026-08-14.** Test generation asked gpt-5.6-sol for a ~40-line pytest file with `max_tokens=1600` and got an **empty body** — reasoning consumed the whole budget before a character was emitted. Raised to 6000 in `tasks/generate_tests.py` and the same commit then generated a verified test on the first attempt. So this is not a quirk of the 1-token probe: any caller sizing `max_tokens` for the visible output alone will starve a reasoning model. Worth auditing every literal `max_tokens` when this defect is finally closed.
+
+Does **not** affect repository analysis, which asks for 1200 tokens.
+
+---
+
+## 17. OpenAI provider sent two parameters the gpt-5 family rejects 🔴 ✅ FIXED (2026-08-14)
+
+Repository analysis against `ANALYZER_PROVIDER=openai` failed before reaching the model. Two independent vendor mismatches, both measured against the live API rather than read from docs:
+
+| parameter | gpt-5.6-sol / gpt-5.5 | gpt-4.1 |
+|---|---|---|
+| `max_tokens` | 400 — "use `max_completion_tokens` instead" | accepted |
+| `temperature=0.0` | 400 — "only the default (1) value is supported" | accepted |
+
+Callers were blameless: `suggest_setup` asks for `max_tokens=1200, temperature=0.0` and should keep asking for exactly that. Translating a request into a vendor's dialect is the provider's job.
+
+Now: `OpenAICompatibleProvider.max_tokens_field` names the wire spelling per vendor (NIM keeps `max_tokens`, OpenAI sends `max_completion_tokens`), and `OpenAIProvider.complete` drops `temperature` for the families that reject it. Dropped rather than coerced to 1.0 — the vendor default *is* 1, so omitting records "could not honour" instead of implying the caller asked for it.
+
+**The cost, stated plainly:** gpt-5.x analysis is **not reproducible**. The determinism knob does not exist on those models. Pin `ANALYZER_MODEL=gpt-4.1` when a repeatable analysis matters more than the stronger model.
+
+**Guard against regression:** `tests/test_openai_provider.py` asserts both spellings on the wire and that gpt-4.x keeps its `temperature=0.0`.
+
+---
 
 ## 15. GitHub clones raced themselves ✅ FIXED (2026-08-11)
 

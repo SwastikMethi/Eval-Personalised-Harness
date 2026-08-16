@@ -97,6 +97,25 @@ class HarnessAdapter(ABC):
     async def cleanup(self, run_id: str) -> None: ...
 
 
+# How a harness hands back what the agent changed. Identical for every harness,
+# so it lives here rather than being retyped per adapter.
+#
+# `--binary` and the two exclusions are both load-bearing, and were paid for:
+# a mini-swe-agent run wrote a correct two-file fix, and the whole patch was
+# rejected with "cannot apply binary patch to 'src/__pycache__/…pyc' without
+# full index line" because running the code had regenerated eight .pyc files
+# that `git add -A` swept up. The run scored 0.0 for work it had actually done,
+# and the hidden test never got to run at all.
+#
+# Compiled Python is excluded rather than made appliable: it is derived from
+# the .py files in the same patch, so grading it is meaningless even when it
+# applies. `--binary` stays for the genuine case — an agent that legitimately
+# adds or edits a binary asset should still be gradeable.
+PATCH_EXTRACT_COMMAND = (
+    "git add -A && git diff --cached --binary -- . "
+    "':(exclude)**/__pycache__/**' ':(exclude)**/*.py[co]'"
+)
+
 _REGISTRY: dict[str, HarnessAdapter] = {}
 
 

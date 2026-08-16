@@ -12,8 +12,9 @@ over the answer and reduce the benchmark to transcription.
 
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
-from app.tasks.historical import commit_task_description
+from app.tasks.historical import ai_task_description, commit_task_description
 from tests.test_repo_service import make_git_repo
 
 
@@ -85,4 +86,74 @@ def test_survives_a_commit_with_no_body(tmp_path: Path) -> None:
     ).stdout.strip()
     title, prompt = commit_task_description(tmp_path, sha)
     assert title == "init"
+    assert "implement" in prompt.lower()
+
+
+# --- model-written descriptions ---------------------------------------------
+# The model reads the diff so it can describe the symptom; the agent must still
+# never see it. The guard is enforced, because a prompt is not a guarantee.
+
+
+class Replies:
+    name = "stub"
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    async def complete(self, model_id, messages, **kwargs):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(content=self.text)
+
+
+class Explodes:
+    name = "stub"
+
+    async def complete(self, model_id, messages, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("upstream is down")
+
+
+async def test_model_body_is_used_and_still_framed(tmp_path: Path) -> None:
+    sha = _repo_with_change(tmp_path)
+    good = (
+        "Median of an even-length list returns the upper middle value instead of "
+        "the average of the two middle values. It should return their mean."
+    )
+    title, prompt = await ai_task_description(tmp_path, sha, Replies(good), "m1")
+
+    assert title == "added median fix for even-length lists"
+    assert "average of the two middle values" in prompt
+    # The framing is not optional just because a model wrote the body.
+    assert "not been applied" in prompt.lower()
+    assert "app.py" in prompt
+
+
+async def test_a_description_carrying_the_fix_falls_back(tmp_path: Path) -> None:
+    """Three consecutive lines of the diff is transcription, not a task."""
+    sha = _repo_with_change(tmp_path)
+    leaky = (
+        "Fix median like this:\n"
+        "    xs = sorted(xs)\n"
+        "    n = len(xs)\n"
+        "    SENTINEL_FIX_BODY = True\n"
+    )
+    _, prompt = await ai_task_description(tmp_path, sha, Replies(leaky), "m1")
+
+    assert "SENTINEL_FIX_BODY" not in prompt
+    # Fell back to the deterministic description, which is still usable.
+    assert "added median fix for even-length lists" in prompt
+
+
+async def test_diff_syntax_falls_back(tmp_path: Path) -> None:
+    sha = _repo_with_change(tmp_path)
+    _, prompt = await ai_task_description(
+        tmp_path, sha, Replies("@@ -1,2 +1,5 @@\n change the median function"), "m1"
+    )
+    assert "@@" not in prompt
+    assert "added median fix for even-length lists" in prompt
+
+
+async def test_a_dead_provider_still_produces_a_task(tmp_path: Path) -> None:
+    """A benchmark that cannot create a task is worse than a plainer prompt."""
+    sha = _repo_with_change(tmp_path)
+    title, prompt = await ai_task_description(tmp_path, sha, Explodes(), "m1")
+    assert title == "added median fix for even-length lists"
     assert "implement" in prompt.lower()

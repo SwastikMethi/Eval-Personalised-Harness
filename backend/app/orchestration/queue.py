@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.api.proxy import issue_run_token, revoke_run_token, run_usage
 from app.core.config import settings
 from app.core.errors import ErrorCategory
-from app.harnesses.base import HarnessRunRequest, get_harness
+from app.harnesses.base import PATCH_EXTRACT_COMMAND, HarnessRunRequest, get_harness
 from app.models import (
     Artifact,
     BenchmarkRun,
@@ -116,11 +116,34 @@ def materialize_workspace(
     history, so the solution commit, the original remotes, and future history
     never enter the sandbox. Falling back to a raw directory copy is only for
     fixture-driven demos, which have no history to leak.
+
+    The repo's test-environment fixup is applied HERE, deliberately, rather than
+    at the two call sites. This function builds both the agent's workspace and
+    the tree the patch is graded in; repairing one and not the other would give
+    the agent a different repository from the one that scores it, and nothing
+    would fail — the numbers would just quietly stop meaning anything.
     """
     if task.base_commit:
         if repo is None:
             raise RuntimeError(f"task {task.id} has a base commit but no repository")
         service.create_snapshot(repo_root(repo), task.base_commit, dest)
+        from app.repositories import repair
+
+        if repair.load_fixup(repo.id) and not repair.apply_fixup(dest, repo.id):
+            # Both trees fail identically, so the comparison stays valid — the
+            # suite is just unrepaired. Worth knowing about, not worth aborting.
+            log.warning("repo %s: test-environment fixup did not apply", repo.id)
+        return
+    if task.kind == "theory":
+        # A comprehension task has no "before" state to reconstruct — the
+        # question is about the repository as it stands, and there is no answer
+        # hidden in later history to leak. Snapshot HEAD, still through
+        # create_snapshot so the sandbox gets fresh git history and no remotes.
+        if repo is None:
+            raise RuntimeError(f"theory task {task.id} has no repository to read")
+        root = repo_root(repo)
+        _, head = service.head_info(root)
+        service.create_snapshot(root, head, dest)
         return
     fixture = config.get("fixture_path")
     if fixture:
@@ -129,6 +152,31 @@ def materialize_workspace(
     raise RuntimeError(
         f"task {task.id} has neither a base commit nor a fixture_path — "
         "nothing to build a workspace from"
+    )
+
+
+def budget_failure_message(usage: dict[str, Any]) -> str:
+    """Explain a spent budget from what was measured, not from what once happened.
+
+    This string used to be a constant blaming "a terminal 429 retried instead of
+    stopping". That was true of the incident that prompted it and of nothing
+    since: the run that exposed it had 8 of 8 requests succeed with
+    `rate_limited` false, and the message sent its reader hunting a rate-limit
+    problem that did not exist. Asserting a cause nobody measured is the same
+    class of error as reporting a metric nobody collected.
+    """
+    spent = usage.get("requests")
+    failed = usage.get("failed_requests") or 0
+    if usage.get("rate_limited") or failed:
+        return (
+            f"request budget spent before a patch was produced: {failed} of {spent} "
+            "requests failed upstream and the harness kept retrying instead of "
+            "stopping, so the run was ended rather than held until its timeout"
+        )
+    return (
+        f"request budget spent before a patch was produced: all {spent} requests "
+        f"succeeded ({usage.get('input_tokens')} tokens in, "
+        f"{usage.get('output_tokens')} out) but the agent never wrote a change"
     )
 
 
@@ -199,13 +247,25 @@ class QueueWorker:
         return True
 
     @staticmethod
+    def _clear_attempt(run: BenchmarkRun) -> None:
+        """Wipe the previous attempt's outcome before a run goes back to PENDING.
+
+        `completed_at` used to survive a retry, so a re-run row read
+        `started_at 12:40:45` against `completed_at 12:35:44` — finished five
+        minutes before it began — and every duration derived from those two
+        columns came out negative.
+        """
+        run.completed_at = None
+        run.error_category = None
+        run.error_message = None
+
+    @staticmethod
     def retry_run(session: Session, run_id: str) -> bool:
         run = session.get(BenchmarkRun, run_id)
         if run is None or RunState.PENDING not in VALID_TRANSITIONS[RunState(run.state)]:
             return False
         run.state = RunState.PENDING
-        run.error_category = None
-        run.error_message = None
+        QueueWorker._clear_attempt(run)
         session.commit()
         return True
 
@@ -305,7 +365,7 @@ class QueueWorker:
         if self._sandboxes is not None:
             try:
                 extracted = await self._sandboxes.exec(
-                    run_id, "git add -A && git diff --cached", timeout_s=120
+                    run_id, PATCH_EXTRACT_COMMAND, timeout_s=120
                 )
                 patch = extracted.stdout if extracted.exit_code == 0 else None
             except Exception:  # noqa: BLE001 - the container may already be gone
@@ -342,11 +402,7 @@ class QueueWorker:
             else:
                 transition(run, RunState.FAILED)
                 run.error_category = ErrorCategory.BUDGET_EXCEEDED
-                run.error_message = (
-                    "request budget spent before a patch was produced; the harness kept "
-                    "retrying a terminal 429 instead of stopping, so the run was ended "
-                    "rather than held until its timeout"
-                )
+                run.error_message = budget_failure_message(usage)
             run.completed_at = datetime.now(UTC)
             run.result = {
                 "status": "completed" if patch_produced else "failed",
@@ -452,7 +508,7 @@ class QueueWorker:
             experiment = session.get(Experiment, combo.experiment_id)
             assert task is not None and experiment is not None
             harness_name, model_id, provider = combo.harness, combo.model_id, combo.provider
-            prompt, task_id = task.prompt, task.id
+            prompt, task_id, task_kind = task.prompt, task.id, task.kind
             config = dict(experiment.config)
             repo = session.get(Repository, task.repository_id)
             self._event(session, run_id, "preparing", {})
@@ -467,11 +523,24 @@ class QueueWorker:
             materialize_workspace(task, repo, config, workspace)
 
             in_price, out_price = self._model_prices(model_id)
+            # An explicit null means uncapped — the agent stops when it is done,
+            # not when it runs out of allowance. Absent means the default still
+            # applies, so a config written before this existed is unaffected.
+            requested = (
+                config.get("max_model_requests", DEFAULT_MAX_MODEL_REQUESTS)
+                if "max_model_requests" in config
+                else DEFAULT_MAX_MODEL_REQUESTS
+            )
             token = issue_run_token(
                 run_id,
                 model_id,
-                max_requests=int(
-                    config.get("max_model_requests", DEFAULT_MAX_MODEL_REQUESTS)
+                max_requests=None if requested is None else int(requested),
+                # The ceiling that actually bounds spend when requests do not.
+                # Measured: one run spent 3.0M input tokens over 100 calls,
+                # because each call resends the whole conversation — so a
+                # request count says almost nothing about what a run costs.
+                max_input_tokens=config.get(
+                    "max_input_tokens", settings.default_max_input_tokens
                 ),
                 max_cost_usd=config.get("max_cost_usd"),
                 # Without prices the proxy accrues 0.0 forever and the spend
@@ -578,12 +647,41 @@ class QueueWorker:
             # 4 GiB limit that overcommitted the VM, and runs were killed with
             # exit 137 / oom_killed=False (a VM-level kernel kill, not a cgroup
             # limit). One run lost 28 successful model calls that way.
+            #
+            # Ask the container how much memory it used while it still exists to
+            # answer. SandboxManager.stats() has always collected this and
+            # nothing ever called it, so every `exit 137` to date was diagnosed
+            # by argument rather than measurement — including one this week that
+            # cost a whole harness's result.
+            sandbox_stats: dict[str, Any] = {}
             if sandboxed and self._sandboxes is not None:
+                try:
+                    sandbox_stats = await self._sandboxes.stats(run_id)
+                except Exception:  # noqa: BLE001 - never lose a run over telemetry
+                    log.warning("could not read sandbox stats", extra={"run_id": run_id})
                 await self._sandboxes.cleanup(run_id)
 
-            evaluation = await asyncio.to_thread(
-                self._evaluate, run_id, task_id, result.patch, config
-            )
+            # A comprehension task is graded by rubric, not by running a suite:
+            # there is no patch to apply and no tests to pass, so `_evaluate`
+            # would return "no evaluation configured" and the run would score
+            # nothing at all.
+            if task_kind == "theory":
+                evaluation = await self._judge(
+                    run_id,
+                    task_id,
+                    result.patch,
+                    result.final_message,
+                    effort={
+                        "commands_executed": result.commands_executed,
+                        "agent_steps": result.agent_steps,
+                        "model_requests": usage.get("requests"),
+                    },
+                )
+            else:
+                evaluation = await asyncio.to_thread(
+                    self._evaluate, run_id, task_id, result.patch, config
+                )
+                evaluation = await self._judge_diff(run_id, task_id, result.patch, evaluation)
 
             peak_concurrency = max(started_concurrency, len(self._active))
             with self._sessions() as session:
@@ -606,6 +704,25 @@ class QueueWorker:
                 elif result.status == "completed":
                     transition(run, RunState.COMPLETED)
                     run.error_category = ErrorCategory.NONE
+                elif result.status == "timeout" and patch_produced:
+                    # The same salvage `_end_budget_run` performs for a spent
+                    # budget, for the same reason: work that reached a gradeable
+                    # patch is a result, and the clock running out afterwards
+                    # does not unmake it. Without this, removing the request cap
+                    # makes every combination ineligible — `aggregate.py` vetoes
+                    # on both `timeout_rate > 0.5` and `completed == 0`, so runs
+                    # that stop on time instead of on budget produce no ranking
+                    # at all however good their patches were.
+                    #
+                    # Slowness is not swallowed: duration still feeds
+                    # execution_efficiency, 15% of the weighted score. It is
+                    # priced there rather than used as an eligibility veto.
+                    transition(run, RunState.COMPLETED)
+                    run.error_category = ErrorCategory.NONE
+                    run.error_message = (
+                        "ran out of time, but produced a patch before it did — graded on "
+                        "that patch, with the duration counted against its efficiency"
+                    )
                 elif result.status == "timeout":
                     transition(run, RunState.TIMED_OUT)
                     run.error_category = ErrorCategory.TIMEOUT
@@ -668,6 +785,9 @@ class QueueWorker:
                     # Harness telemetry (spec §14). Without it a run that exits
                     # 0 having done nothing looks identical to a good one.
                     "harness_meta": result.raw_metadata,
+                    # peak_memory in bytes, read before teardown. The number that
+                    # turns the next `exit 137` from a guess into a measurement.
+                    "sandbox": sandbox_stats,
                 }
                 self._event(session, run_id, result.status, {"patch_produced": patch_produced})
                 self._settle_experiment(session, run_id)
@@ -677,6 +797,133 @@ class QueueWorker:
             if sandboxed and self._sandboxes is not None:
                 await self._sandboxes.cleanup(run_id)
             shutil.rmtree(tmp_root, ignore_errors=True)
+
+    async def _judge_diff(
+        self, run_id: str, task_id: str, patch: str | None, evaluation: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Score the agent's change against the real commit, per ADR-005.
+
+        Averaged with the test score rather than replacing it, because the
+        metric has a known bias the ADR records: a correct fix written
+        differently from the original scores low. When tests produce real
+        signal they remain the better measure; when they produce none — which
+        is the situation that motivated the ADR — this is what is left.
+        """
+        from app.core.config import settings as cfg
+        from app.evaluators import judge as judge_mod
+        from app.models import EvaluationResult
+        from app.repositories import analyzer as analyzer_mod
+        from app.tasks import propose
+
+        meta = propose.load_task_meta(task_id) or {}
+        reference = meta.get("reference_diff")
+        if not reference:
+            return evaluation
+
+        with self._sessions() as session:
+            task = session.get(BenchmarkTask, task_id)
+            title = task.title if task else ""
+
+        try:
+            analyzer = analyzer_mod.select_analyzer(cfg)
+            model_id = await analyzer_mod.resolve_model(analyzer)
+            verdict = await judge_mod.judge_diff(
+                analyzer.provider, model_id, title, patch, reference
+            )
+        except analyzer_mod.AnalyzerUnavailable as exc:
+            verdict = judge_mod.DiffVerdict(error=str(exc))
+
+        test_score = evaluation.get("score")
+        parts = [s for s in (test_score, verdict.score) if s is not None]
+        combined = sum(parts) / len(parts) if parts else None
+
+        with self._sessions() as session:
+            row = session.scalars(
+                select(EvaluationResult).where(EvaluationResult.run_id == run_id)
+            ).first()
+            if row is not None:
+                # Both components stay visible so the number can be taken apart —
+                # ADR-005 requires the judged half be arguable with.
+                row.results = {
+                    **(row.results or {}),
+                    "diff_judge": verdict.as_dict(),
+                    "test_score": test_score,
+                    "correctness_is": "mean(test, judged diff)" if len(parts) > 1 else "single",
+                }
+                row.score = combined
+                session.commit()
+        return {**evaluation, "score": combined}
+
+    async def _judge(
+        self,
+        run_id: str,
+        task_id: str,
+        patch: str | None,
+        final_message: str | None,
+        effort: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Grade a comprehension answer against its stored rubric.
+
+        Runs instead of `_evaluate` for a theory task: there is no patch to
+        apply and no suite to run, so the score is the share of rubric criteria
+        the answer actually satisfied — counted from the rubric, not asked of
+        the model. See evaluators/judge.py for why grounded-and-blind is the
+        only version of this worth having.
+        """
+        from app.core.config import settings as cfg
+        from app.evaluators import judge as judge_mod
+        from app.evaluators.engine import INSUFFICIENT_EVALUATION_SIGNAL
+        from app.models import EvaluationResult
+        from app.repositories import analyzer as analyzer_mod
+        from app.repositories import digest as digest_mod
+        from app.tasks import propose
+
+        with self._sessions() as session:
+            task = session.get(BenchmarkTask, task_id)
+            repo = session.get(Repository, task.repository_id) if task else None
+            question = task.prompt if task else ""
+
+        stored = propose.load_rubric(task_id) or {}
+        rubric = stored.get("rubric") or []
+        answer, source = judge_mod.resolve_answer(patch, final_message)
+
+        tree: list[str] = []
+        if repo is not None:
+            try:
+                tree = digest_mod.build_digest(repo_root(repo)).tree
+            except Exception:  # noqa: BLE001 - judge without the tree rather than not at all
+                log.warning("could not build a digest for judging", extra={"run_id": run_id})
+
+        try:
+            analyzer = analyzer_mod.select_analyzer(cfg)
+            model_id = await analyzer_mod.resolve_model(analyzer)
+            verdict = await judge_mod.judge_answer(
+                analyzer.provider, model_id, question, rubric, answer, tree
+            )
+            provenance = analyzer.provenance
+        except analyzer_mod.AnalyzerUnavailable as exc:
+            verdict = judge_mod.Verdict(error=str(exc))
+            provenance = {}
+
+        results = {
+            "judge": verdict.as_dict() | {"provenance": provenance},
+            "answer_source": source,
+            "answer_chars": len(answer or ""),
+            # How hard the agent actually looked. Without this, an answer that
+            # scored zero because the agent never opened a file is
+            # indistinguishable from one that read the whole repo and still got
+            # it wrong — and those are completely different findings.
+            "effort": effort or {},
+        }
+        signal = "ok" if verdict.score is not None else INSUFFICIENT_EVALUATION_SIGNAL
+        with self._sessions() as session:
+            session.add(
+                EvaluationResult(
+                    run_id=run_id, signal=signal, score=verdict.score, results=results
+                )
+            )
+            session.commit()
+        return {"signal": signal, "score": verdict.score}
 
     def _evaluate(
         self, run_id: str, task_id: str, patch: str | None, config: dict[str, Any]
@@ -814,6 +1061,7 @@ class QueueWorker:
                         continue
                 transition(run, RunState.PENDING)
                 run.retry_after = None
+                self._clear_attempt(run)
                 released = True
             if released:
                 session.commit()

@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.evaluators import runner_repair
 from app.evaluators.parsers import PARSERS, parse_generic
 from app.sandboxes.exec import CommandResult, Executor, run_host_command
 
@@ -26,35 +27,11 @@ class BaselineOutcome:
     repaired: bool = False
 
 
-# A runner that is not installed produces one of these, and the message is the
-# only reliable signal: exit codes vary (1 from python -m, 127 from a shell).
-_MISSING_RUNNER_PATTERNS = (
-    "no module named",
-    "not found",
-    "command not found",
-    "is not recognized",
-)
-
-# Installing the runner is what makes the suite runnable at all. Kept minimal:
-# these are test runners, not a general dependency solver.
-_RUNNER_INSTALL = {
-    "pytest": "python -m pip install pytest",
-    "vitest": "npm install --no-save vitest",
-    "jest": "npm install --no-save jest",
-}
-
-
-def _looks_like_missing_runner(result: CommandResult, runner: str | None) -> bool:
-    """Did the test command fail because its runner is absent?
-
-    Distinct from "the tests failed": a suite that runs and reports failures is
-    a legitimate baseline, while a runner that was never installed means the
-    suite did not execute at all.
-    """
-    if result.exit_code == 0 or not runner:
-        return False
-    haystack = f"{result.stdout}\n{result.stderr}".lower()
-    return runner.lower() in haystack and any(p in haystack for p in _MISSING_RUNNER_PATTERNS)
+# Moved to evaluators/runner_repair.py so the evaluator repairs identically.
+# It did not, and a repo whose requirements omit pytest baselined fine and then
+# graded every agent at 0.0 — see that module's docstring.
+_RUNNER_INSTALL = runner_repair.RUNNER_INSTALL
+_looks_like_missing_runner = runner_repair.looks_like_missing_runner
 
 
 def _record(result: CommandResult) -> dict[str, Any]:

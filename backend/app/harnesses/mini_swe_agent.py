@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.harnesses.base import (
+    PATCH_EXTRACT_COMMAND,
     HarnessAdapter,
     HarnessRunRequest,
     HarnessRunResult,
@@ -109,7 +110,7 @@ class MiniSweAgentHarness(HarnessAdapter):
         result = await self._manager.exec(run_id, cmd, timeout_s=request.timeout_seconds)
 
         patch_result = await self._manager.exec(
-            run_id, "git add -A && git diff --cached", timeout_s=120
+            run_id, PATCH_EXTRACT_COMMAND, timeout_s=120
         )
         patch = patch_result.stdout if patch_result.exit_code == 0 else None
 

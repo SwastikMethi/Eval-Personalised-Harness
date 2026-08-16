@@ -73,13 +73,78 @@ export interface HiddenTest {
   approved: boolean | null
 }
 
+export interface Provenance {
+  provider: string
+  model: string
+}
+
 export interface Suggestion {
   model_id: string
+  provenance: Provenance
   confidence: 'high' | 'low'
   commands: Record<string, string | null>
   rationale: Record<string, string>
   commits: { sha: string; why: string; subject: string; parent: string }[]
   files_read: string[]
+}
+
+/** Outcome of repairing the repo's TEST ENVIRONMENT — never its source. An
+ *  unapplied result is the normal case for a healthy repo, not an error. */
+export interface PrepareTestsResult {
+  applied: boolean
+  reason: string
+  provenance: Provenance
+  changed_paths: string[]
+  before?: { benchmarkable: boolean; passing: number }
+  after?: { benchmarkable: boolean; passing: number }
+  patch?: string
+}
+
+/** `verified` means PROVEN to fail before the fix and pass after it — not that
+ *  the model sounded confident. `evidence` carries the per-case outcomes at
+ *  each commit so a rejection can be read rather than taken on trust. */
+export interface GeneratedTestReport {
+  relpath: string
+  verified: boolean
+  reject_reason: string | null
+  attempts: number
+  evidence: Record<string, [string, string][]>
+}
+
+/** A comprehension task and the rubric that will grade it. The rubric is
+ *  written when the question is, from the same repo digest, and every criterion
+ *  cites a path that was checked to exist — so a hallucinated rubric cannot
+ *  mark an answer wrong. `dropped` shows the criteria that failed that check. */
+export interface ProposedTask {
+  id: string
+  category: 'architecture' | 'execution_flow' | 'feature_plan'
+  title: string
+  prompt: string
+  /** `depth` is what lets a low score be read: all-structural-met means the
+   *  agent skimmed and was honest; all-missed means it did not look. */
+  rubric: { criterion: string; evidence: string; depth: string }[]
+  dropped: string[]
+}
+
+/** `score` is the share of rubric criteria met, counted from the rubric rather
+ *  than reported by the model. `invented` lists names the answer claimed exist
+ *  in the repo but do not. */
+export interface JudgeVerdict {
+  score: number | null
+  met: string[]
+  missing: string[]
+  invented: string[]
+  rationale: string
+  error: string
+}
+
+export interface PrepareTaskResult {
+  task_id: string
+  title: string
+  prompt: string
+  prompt_source: 'model' | 'commit-message'
+  provenance: Provenance
+  generated_test: GeneratedTestReport | null
 }
 
 /** A strategy VERIFIED by execution, unlike Suggestion which is advisory.
@@ -174,6 +239,10 @@ export interface ComboRecommendation {
   avg_tokens: number | null
   failure_rate: number
   statistically_weak: boolean
+  /** True when nothing scored above zero, or when the leaders are too close to
+   *  separate. The entry still carries the top row's numbers, but naming it a
+   *  winner would be false precision — read `why`. */
+  tied?: boolean
   why?: string
 }
 
@@ -281,6 +350,12 @@ export const api = {
   repositories: () => get<Repository[]>('/repositories'),
   experiment: (id: string) => get<ExperimentStatus>(`/experiments/${id}`),
   results: (id: string) => get<ExperimentResults>(`/experiments/${id}/results`),
+  // A written comparison of how the combinations did. POST and not automatic:
+  // it costs a model call and would read differently on every page load.
+  summary: (id: string) =>
+    post<{ summary: string; provenance: Provenance; caveats: string[] }>(
+      `/experiments/${id}/summary`,
+    ),
 
   harnesses: () => get<Harness[]>('/harnesses'),
   providers: () => get<ProviderInfo[]>('/providers'),
@@ -312,6 +387,9 @@ export const api = {
   // matrix is queued instead of after.
   evaluationStrategy: (id: string) =>
     post<StrategyDecision>(`/repositories/${id}/evaluation-strategy`),
+  // Repairs how the suite RUNS (deps, pytest config, broken test files) and
+  // keeps the patch only if it measurably improves the baseline.
+  prepareTests: (id: string) => post<PrepareTestsResult>(`/repositories/${id}/prepare-tests`),
   commits: (id: string) => get<Commit[]>(`/repositories/${id}/commits`),
 
   createTask: (body: { repository_id: string; title: string; prompt: string }) =>
@@ -320,6 +398,16 @@ export const api = {
     post<{ id: string; base_commit: string; hidden_test_candidates: number }>(
       '/tasks/from-commit',
       body,
+    ),
+  // Slow and deliberate: rewrites the prompt and, when the commit shipped no
+  // tests, generates one and PROVES it discriminates. Minutes, not a tick.
+  prepareTask: (taskId: string, sha: string) =>
+    post<PrepareTaskResult>(`/tasks/${taskId}/prepare`, { sha }),
+  // Comprehension tasks: no test suite, no patch to apply, graded by rubric.
+  // Creates the tasks so they can be ticked like commits.
+  proposeTasks: (repoId: string) =>
+    post<{ provenance: Provenance; tasks: ProposedTask[] }>(
+      `/repositories/${repoId}/propose-tasks`,
     ),
   hiddenTests: (taskId: string) => get<HiddenTest[]>(`/tasks/${taskId}/hidden-tests`),
   approveHiddenTest: (id: string, approved: boolean) =>

@@ -1,7 +1,8 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   Alert,
   Box,
+  Button,
   Chip,
   CircularProgress,
   Grid,
@@ -49,6 +50,24 @@ function RecommendationCard({
       <Panel label={label} sx={{ height: '100%' }}>
         <Empty>No eligible combination.</Empty>
         <Typography sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.faint, mt: 1 }}>
+          {blurb}
+        </Typography>
+      </Panel>
+    )
+  }
+  // A tie is a result, and printing a name here would overstate it — the card
+  // is the most-read thing on the page, so it must not claim a winner the
+  // numbers do not support.
+  if (rec.tied) {
+    return (
+      <Panel label={label} sx={{ height: '100%' }}>
+        <Typography
+          sx={{ fontFamily: fonts.mono, fontSize: '0.9rem', color: C.warn, fontWeight: 600 }}
+        >
+          no winner
+        </Typography>
+        <Typography sx={{ fontSize: '0.76rem', color: C.dim, mt: 1 }}>{rec.why}</Typography>
+        <Typography sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.faint, mt: 1.5 }}>
           {blurb}
         </Typography>
       </Panel>
@@ -195,6 +214,9 @@ export default function Results({ experimentId }: { experimentId: string }) {
     queryFn: () => api.results(experimentId),
     refetchInterval: 10_000,
   })
+  // On demand, not on load: it costs a model call and would be worded
+  // differently every time the page refreshed.
+  const summary = useMutation({ mutationFn: () => api.summary(experimentId) })
 
   if (isLoading) return <CircularProgress size={20} />
   if (isError)
@@ -363,6 +385,44 @@ export default function Results({ experimentId }: { experimentId: string }) {
                     <Mono color={C.warn}>{n}</Mono>
                   </Box>
                 ))
+            )}
+          </Panel>
+        </Grid>
+        <Grid size={{ xs: 12 }}>
+          <Panel
+            label="Which combination did better"
+            action={
+              <Button
+                size="small"
+                variant="outlined"
+                disabled={summary.isPending}
+                onClick={() => summary.mutate()}
+                startIcon={summary.isPending ? <CircularProgress size={12} /> : null}
+              >
+                {summary.isPending ? 'Reading the results…' : 'Write the comparison'}
+              </Button>
+            }
+          >
+            {summary.isError && (
+              <Alert severity="error" sx={{ mb: 1.5 }}>
+                {(summary.error as Error).message}
+              </Alert>
+            )}
+            {summary.data?.summary ? (
+              <>
+                <Typography
+                  sx={{ fontSize: '0.86rem', color: C.text, whiteSpace: 'pre-wrap', mb: 1 }}
+                >
+                  {summary.data.summary}
+                </Typography>
+                <Typography sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.faint }}>
+                  written by {summary.data.provenance?.model} — reads only the numbers below
+                </Typography>
+              </>
+            ) : (
+              <Empty>
+                Not generated yet. It costs one model call, so it is not written automatically.
+              </Empty>
             )}
           </Panel>
         </Grid>

@@ -27,7 +27,7 @@ import {
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../api'
-import type { Analysis, Commit, HiddenTest } from '../api'
+import type { Analysis, Commit, HiddenTest, ProposedTask } from '../api'
 import { Empty, Mono, PageTitle, Panel, Stat } from '../components/primitives'
 import { C, fonts } from '../theme'
 
@@ -58,19 +58,36 @@ export default function NewRun() {
   const [baselineStale, setBaselineStale] = useState(false)
 
   // step 2
-  const [taskMode, setTaskMode] = useState<'commit' | 'describe'>('commit')
+  // Comprehension tasks need no test suite, no patch and no environment
+  // repair — which is why they are the mode that works on a repo whose own
+  // tests cannot distinguish a correct patch from an empty one.
+  const [taskMode, setTaskMode] = useState<'commit' | 'comprehension' | 'describe'>('commit')
+  const [proposed, setProposed] = useState<ProposedTask[]>([])
   const [shaToTask, setShaToTask] = useState<Record<string, string>>({})
   const [selectedShas, setSelectedShas] = useState<string[]>([])
   const [describedTaskIds, setDescribedTaskIds] = useState<string[]>([])
   const [title, setTitle] = useState('')
   const [prompt, setPrompt] = useState('')
   const [hidden, setHidden] = useState<HiddenTest[]>([])
+  // Of 11 commits on a typical small repo, 5 are README edits and 2 are merges.
+  // The model's shortlist is the default; the raw log stays one click away so a
+  // bad nomination never traps the user.
+  const [showAllCommits, setShowAllCommits] = useState(false)
 
   // step 3
   const [harnesses, setHarnesses] = useState<string[]>([])
   const [models, setModels] = useState<string[]>([])
   const [reps, setReps] = useState(1)
+  // Two knobs, not one. They used to be the same number sent as both
+  // max_model_requests and max_steps, which meant you could not bound spend
+  // without also bounding how much work the agent was allowed to attempt.
   const [budget, setBudget] = useState(8)
+  const [steps, setSteps] = useState(50)
+  // Uncapped lets the agent stop when it is finished rather than when it runs
+  // out of allowance. Safe because a run that times out having produced a patch
+  // is still graded — but only sensible where tokens, not a daily request
+  // quota, are the constraint, so it stays off for free-tier providers.
+  const [uncapped, setUncapped] = useState(false)
   const [setupOpen, setSetupOpen] = useState(false)
   // Free-only by default: of 400+ models on OpenRouter only ~14 are free, and
   // this account has no credits, so listing the rest is 400 ways to fail.
@@ -202,6 +219,19 @@ export default function NewRun() {
   })
   const strategy = decideStrategy.data
 
+  /** Ask the analyzer for comprehension questions and the rubric each will be
+   *  graded against. The tasks are created server-side so they tick like
+   *  commits; the rubric is shown before launch so a low score can be checked
+   *  against what was actually asked for. */
+  const proposeTasks = useMutation({
+    mutationFn: () => api.proposeTasks(repoId!),
+    onSuccess: ({ tasks }) => {
+      setProposed(tasks)
+      setError(null)
+    },
+    onError: fail,
+  })
+
   const describeTask = useMutation({
     mutationFn: () => api.createTask({ repository_id: repoId!, title, prompt }),
     onSuccess: ({ id }) => {
@@ -217,6 +247,51 @@ export default function NewRun() {
     () => [...selectedShas.map((s) => shaToTask[s]).filter(Boolean), ...describedTaskIds],
     [selectedShas, shaToTask, describedTaskIds],
   )
+
+  /** Ask for the shortlist as soon as the user reaches the task step. One
+   *  request, reused by the setup panel on the next step — the model reads the
+   *  repository once, not once per thing we want from it. */
+  useEffect(() => {
+    if (step === 1 && repoId && !askAi.data && !askAi.isPending) askAi.mutate()
+  }, [step, repoId, askAi])
+
+  /** The shortlist, restored to full commit metadata. Nominations carry the
+   *  sha, subject, parent and the model's reason; author and date come from
+   *  the git log we already fetched. */
+  const nominated = useMemo(() => {
+    const byS = new Map((commits.data ?? []).map((c: Commit) => [c.sha, c]))
+    return (suggestion?.commits ?? [])
+      .map((n) => ({ ...byS.get(n.sha), ...n }))
+      .filter((c) => c.parent)
+  }, [suggestion, commits.data])
+
+  const usingShortlist = !showAllCommits && nominated.length > 0
+  const commitList = usingShortlist
+    ? nominated
+    : (commits.data ?? []).filter((c: Commit) => c.parent).slice(0, 50)
+
+  /** The slow step, run once per selected commit: rewrite the prompt, and
+   *  generate a hidden test when the commit shipped none — each proven to fail
+   *  before the fix and pass after it before it is offered for approval. */
+  const prepare = useMutation({
+    mutationFn: async () => {
+      await api.prepareTests(repoId!)
+      const reports = []
+      for (const sha of selectedShas) {
+        const taskId = shaToTask[sha]
+        if (taskId) reports.push(await api.prepareTask(taskId, sha))
+      }
+      const lists = await Promise.all(
+        selectedShas.map((s) => shaToTask[s]).filter(Boolean).map(api.hiddenTests),
+      )
+      return { reports, candidates: lists.flat() }
+    },
+    onSuccess: ({ candidates }) => {
+      setHidden(candidates)
+      setError(null)
+    },
+    onError: fail,
+  })
 
   const launch = useMutation({
     mutationFn: async () => {
@@ -238,7 +313,13 @@ export default function NewRun() {
         task_ids: taskIds,
         combinations,
         repetitions: reps,
-        config: { max_model_requests: budget, max_steps: budget, timeout_seconds: 1800 },
+        config: {
+          // null is the wire form of "uncapped" — the backend only applies its
+          // default when the key is absent, so this must be sent explicitly.
+          max_model_requests: uncapped ? null : budget,
+          max_steps: steps,
+          timeout_seconds: 1800,
+        },
       })
     },
     onSuccess: ({ id }) => navigate(`/experiments/${id}`),
@@ -370,8 +451,88 @@ export default function NewRun() {
                 sx={{ mb: 2 }}
               >
                 <ToggleButton value="commit">Replay a commit</ToggleButton>
+                <ToggleButton value="comprehension">Understand the code</ToggleButton>
                 <ToggleButton value="describe">Describe a task</ToggleButton>
               </ToggleButtonGroup>
+
+              {taskMode === 'comprehension' && (
+                <>
+                  <Typography sx={{ color: C.dim, fontSize: '0.82rem', mb: 2, maxWidth: '68ch' }}>
+                    Questions with a right answer — architecture, execution flow, or a plan for
+                    a change. Graded against a rubric written from this repository, so both
+                    harnesses are scored against the identical list. No test suite involved,
+                    which is why this works on a repo whose own tests cannot fail.
+                  </Typography>
+                  <Button
+                    variant="outlined"
+                    disabled={proposeTasks.isPending}
+                    onClick={() => proposeTasks.mutate()}
+                    startIcon={proposeTasks.isPending ? <CircularProgress size={13} /> : null}
+                    sx={{ mb: 2 }}
+                  >
+                    {proposeTasks.isPending ? 'Reading the repository…' : 'Propose questions'}
+                  </Button>
+
+                  {proposed.map((t) => (
+                    <Box
+                      key={t.id}
+                      sx={{ mb: 1.5, pb: 1.5, borderBottom: `1px solid ${C.lineSoft}` }}
+                    >
+                      <FormControlLabel
+                        control={
+                          <Checkbox
+                            size="small"
+                            checked={describedTaskIds.includes(t.id)}
+                            onChange={(e) =>
+                              setDescribedTaskIds((prev) =>
+                                e.target.checked
+                                  ? [...prev, t.id]
+                                  : prev.filter((x) => x !== t.id),
+                              )
+                            }
+                          />
+                        }
+                        label={
+                          <Box sx={{ minWidth: 0 }}>
+                            <Mono color={C.text} size="0.78rem">
+                              {t.title}
+                            </Mono>
+                            <Typography sx={{ fontSize: '0.68rem', color: C.faint }}>
+                              {t.category.replace('_', ' ')} · graded on {t.rubric.length} criteria
+                            </Typography>
+                          </Box>
+                        }
+                        sx={{ display: 'flex', alignItems: 'flex-start' }}
+                      />
+                      <Box sx={{ pl: 4 }}>
+                        {t.rubric.map((c, i) => (
+                          <Typography
+                            key={i}
+                            sx={{ fontSize: '0.72rem', color: C.dim, mb: 0.25 }}
+                          >
+                            <Mono
+                              size="0.62rem"
+                              color={c.depth === 'deep' ? C.warn : C.faint}
+                            >
+                              {(c.depth ?? 'deep').slice(0, 4)}
+                            </Mono>{' '}
+                            {c.criterion}{' '}
+                            <Mono size="0.66rem" color={C.faint}>
+                              [{c.evidence}]
+                            </Mono>
+                          </Typography>
+                        ))}
+                        {t.dropped.length > 0 && (
+                          <Typography sx={{ fontSize: '0.68rem', color: C.warn, mt: 0.5 }}>
+                            {t.dropped.length} criterion/criteria dropped — cited paths that do
+                            not exist in this repo
+                          </Typography>
+                        )}
+                      </Box>
+                    </Box>
+                  ))}
+                </>
+              )}
 
               {taskMode === 'commit' ? (
                 <>
@@ -390,45 +551,78 @@ export default function NewRun() {
                       {commits.error instanceof Error ? commits.error.message : 'unknown error'}
                     </Alert>
                   )}
+                  {askAi.isPending && (
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
+                      <CircularProgress size={14} />
+                      <Typography sx={{ fontSize: '0.76rem', color: C.dim }}>
+                        reading the README and the code to shortlist commits worth benchmarking…
+                      </Typography>
+                    </Box>
+                  )}
+                  {nominated.length > 0 && (
+                    <Box
+                      sx={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        mb: 1,
+                      }}
+                    >
+                      <Typography variant="overline">
+                        {usingShortlist
+                          ? `shortlisted · ${nominated.length}`
+                          : `all commits · ${commitList.length}`}
+                      </Typography>
+                      <Button size="small" onClick={() => setShowAllCommits((v) => !v)}>
+                        {usingShortlist ? 'show all commits' : 'show shortlist'}
+                      </Button>
+                    </Box>
+                  )}
                   <Box sx={{ maxHeight: 380, overflowY: 'auto' }}>
-                    {(commits.data ?? [])
-                      .filter((c: Commit) => c.parent)
-                      .slice(0, 50)
-                      .map((c: Commit) => (
-                        <FormControlLabel
-                          key={c.sha}
-                          control={
-                            <Checkbox
-                              size="small"
-                              checked={selectedShas.includes(c.sha)}
-                              disabled={pickCommit.isPending}
-                              onChange={(e) => {
-                                if (e.target.checked) pickCommit.mutate(c.sha)
-                                else setSelectedShas((p) => p.filter((s) => s !== c.sha))
-                              }}
-                            />
-                          }
-                          label={
-                            <Box sx={{ minWidth: 0 }}>
-                              <Mono color={C.text} size="0.76rem">
-                                {c.subject.slice(0, 72)}
-                              </Mono>
+                    {commitList.map((c) => (
+                      <FormControlLabel
+                        key={c.sha}
+                        control={
+                          <Checkbox
+                            size="small"
+                            checked={selectedShas.includes(c.sha)}
+                            disabled={pickCommit.isPending}
+                            onChange={(e) => {
+                              if (e.target.checked) pickCommit.mutate(c.sha)
+                              else setSelectedShas((p) => p.filter((s) => s !== c.sha))
+                            }}
+                          />
+                        }
+                        label={
+                          <Box sx={{ minWidth: 0 }}>
+                            <Mono color={C.text} size="0.76rem">
+                              {(c.subject ?? '').slice(0, 72)}
+                            </Mono>
+                            <Typography
+                              sx={{ fontFamily: fonts.mono, fontSize: '0.64rem', color: C.faint }}
+                            >
+                              {c.sha.slice(0, 8)}
+                              {c.author ? ` · ${c.author}` : ''}
+                              {c.date ? ` · ${c.date.slice(0, 10)}` : ''}
+                            </Typography>
+                            {'why' in c && c.why && (
                               <Typography
-                                sx={{ fontFamily: fonts.mono, fontSize: '0.64rem', color: C.faint }}
+                                sx={{ fontSize: '0.72rem', color: C.dim, mt: 0.25, maxWidth: '54ch' }}
                               >
-                                {c.sha.slice(0, 8)} · {c.author} · {c.date.slice(0, 10)}
+                                {c.why}
                               </Typography>
-                            </Box>
-                          }
-                          sx={{ display: 'flex', mb: 0.5, alignItems: 'flex-start' }}
-                        />
-                      ))}
+                            )}
+                          </Box>
+                        }
+                        sx={{ display: 'flex', mb: 0.5, alignItems: 'flex-start' }}
+                      />
+                    ))}
                   </Box>
                   {!commits.isLoading && !commits.isError && (commits.data ?? []).length === 0 && (
                     <Empty>No commits with a parent found — describe a task instead.</Empty>
                   )}
                 </>
-              ) : (
+              ) : taskMode === 'describe' ? (
                 <>
                   <TextField
                     fullWidth
@@ -455,7 +649,7 @@ export default function NewRun() {
                     Add task
                   </Button>
                 </>
-              )}
+              ) : null}
 
               <Divider sx={{ my: 2.5 }} />
               <Typography variant="overline">selected · {taskIds.length}</Typography>
@@ -489,8 +683,50 @@ export default function NewRun() {
                 Extracted from the target commit and run only <em>after</em> the agent stops.
                 Low-confidence candidates start unapproved — nothing runs without your say-so.
               </Typography>
+
+              <Button
+                size="small"
+                variant="outlined"
+                fullWidth
+                disabled={selectedShas.length === 0 || prepare.isPending}
+                onClick={() => prepare.mutate()}
+                startIcon={prepare.isPending ? <CircularProgress size={13} /> : null}
+                sx={{ mb: 1.5 }}
+              >
+                {prepare.isPending ? 'Preparing & verifying…' : 'Prepare & verify tests'}
+              </Button>
+              <Typography
+                sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.faint, mb: 2 }}
+              >
+                {prepare.isPending
+                  ? 'running the suite at the parent and the fix — minutes, not seconds'
+                  : 'repairs the test environment, and writes a test when the commit shipped none'}
+              </Typography>
+
+              {prepare.data?.reports.map((r) => (
+                <Alert
+                  key={r.task_id}
+                  severity={
+                    r.generated_test && !r.generated_test.verified ? 'warning' : 'success'
+                  }
+                  sx={{ mb: 1.5 }}
+                >
+                  <Typography sx={{ fontSize: '0.76rem' }}>
+                    prompt written by {r.prompt_source === 'model' ? r.provenance.model : 'the commit message'}
+                    {r.prompt_source === 'commit-message' && ' (model output was unusable or leaked the fix)'}
+                  </Typography>
+                  {r.generated_test && (
+                    <Typography sx={{ fontSize: '0.74rem', mt: 0.5 }}>
+                      {r.generated_test.verified
+                        ? `generated ${r.generated_test.relpath} — proven to fail before the fix and pass after it`
+                        : `no usable test after ${r.generated_test.attempts} attempt(s): ${r.generated_test.reject_reason}`}
+                    </Typography>
+                  )}
+                </Alert>
+              ))}
+
               {hidden.length === 0 ? (
-                <Empty>None yet. Tick a commit that adds tests to see candidates.</Empty>
+                <Empty>None yet. Tick a commit, then prepare &amp; verify.</Empty>
               ) : (
                 hidden.map((h) => (
                   <Box key={h.id} sx={{ mb: 1.5, pb: 1.5, borderBottom: `1px solid ${C.lineSoft}` }}>
@@ -685,10 +921,47 @@ export default function NewRun() {
                     type="number"
                     label="requests / run"
                     value={budget}
+                    disabled={uncapped}
                     onChange={(e) => setBudget(Math.max(1, Number(e.target.value)))}
                   />
                 </Grid>
+                <Grid size={{ xs: 6, sm: 3 }}>
+                  <TextField
+                    fullWidth
+                    type="number"
+                    label="steps / run"
+                    value={steps}
+                    onChange={(e) => setSteps(Math.max(1, Number(e.target.value)))}
+                  />
+                </Grid>
               </Grid>
+
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    size="small"
+                    checked={uncapped}
+                    disabled={activeProvider?.has_free_tier !== false}
+                    onChange={(e) => setUncapped(e.target.checked)}
+                  />
+                }
+                label={
+                  <Typography sx={{ fontSize: '0.78rem', color: C.dim }}>
+                    no request limit — stop when the agent finishes
+                  </Typography>
+                }
+              />
+              <Typography
+                sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.faint, mb: 2 }}
+              >
+                {activeProvider?.has_free_tier !== false
+                  ? 'unavailable on a free tier: one uncapped run would spend the daily quota'
+                  : uncapped
+                    ? 'bounded by the token ceiling and the 30-minute timeout instead. A run ' +
+                      'that times out having produced a patch is still graded.'
+                    : 'measured: one agent spent all 100 requests and 3.0M input tokens ' +
+                      'without ever deciding it was done'}
+              </Typography>
 
               <Table size="small" sx={{ mb: 2 }}>
                 <TableBody>

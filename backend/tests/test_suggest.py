@@ -12,8 +12,10 @@ from pathlib import Path
 
 import pytest
 
+from app.providers.base import CompletionResult, CompletionUsage, ModelInfo, ModelProvider
 from app.repositories.digest import MAX_TOTAL_CHARS, build_digest, is_secret
 from app.repositories.suggest import SuggestionError, parse_suggestion
+from tests.test_repo_service import make_git_repo
 
 # --- digest safety ----------------------------------------------------------
 
@@ -139,3 +141,90 @@ def test_junk_types_do_not_crash_the_parser() -> None:
     assert s.commits == []
     assert s.rationale == {}
     assert s.confidence == "low"  # anything but explicit "high" is low
+
+
+# --- endpoint wiring --------------------------------------------------------
+
+
+class _StubOpenAI(ModelProvider):
+    """Lists an OpenAI-shaped model and answers with a valid suggestion."""
+
+    name = "stub"
+
+    async def list_models(self) -> list[ModelInfo]:
+        return [
+            ModelInfo(
+                provider="openai",
+                model_id="gpt-5.6-sol",
+                display_name="gpt-5.6-sol",
+                context_length=None,
+                supports_tools=True,
+                supports_structured_output=True,
+                input_price_per_token=0.0,
+                output_price_per_token=0.0,
+                is_free=False,
+                availability_status="available",
+                is_alias=False,
+            )
+        ]
+
+    async def validate_model(self, model_id: str) -> ModelInfo:
+        return (await self.list_models())[0]
+
+    async def test_connection(self) -> dict[str, object]:
+        return {"ok": True}
+
+    async def complete(
+        self, model_id: str, messages: list[dict[str, object]], **kwargs: object
+    ) -> CompletionResult:
+        body = json.dumps(
+            {"commands": {"test": "pytest -v", "test_framework": "pytest"}, "confidence": "high"}
+        )
+        return CompletionResult(
+            content=body,
+            usage=CompletionUsage(input_tokens=1, output_tokens=1, cached_tokens=0),
+            raw={},
+        )
+
+
+async def test_suggest_uses_the_configured_analyzer_not_a_hardcoded_vendor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """/suggest must honour ANALYZER_PROVIDER like its neighbour does.
+
+    It used to build an OpenRouter provider directly and 409 without that key,
+    so two adjacent buttons in the wizard spent two different vendors' quota
+    and only one of them obeyed the setting. The guard is the absent
+    OPENROUTER_API_KEY below: on the old code this call could not reach 200.
+    """
+    import httpx
+
+    from app.core.config import settings as cfg
+    from app.main import create_app
+    from app.repositories import analyzer as analyzer_mod
+
+    repo_dir = tmp_path / "repo"
+    make_git_repo(repo_dir, {"README.md": "# demo\nrun pytest", "test_x.py": "def test_x(): pass"})
+
+    monkeypatch.setattr(cfg, "openrouter_api_key", "", raising=False)
+    monkeypatch.setattr(cfg, "openai_api_key", "sk-test", raising=False)
+    monkeypatch.setattr(cfg, "analyzer_provider", "openai", raising=False)
+    monkeypatch.setattr(cfg, "analyzer_model", "", raising=False)
+    # Only the network is stubbed — select_analyzer and resolve_model run for real.
+    monkeypatch.setattr(analyzer_mod, "_build", lambda name, settings: _StubOpenAI())
+
+    app = create_app(start_worker=False)
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            created = await client.post(
+                "/api/v1/repositories",
+                json={"name": "demo", "source": "local", "path_or_url": str(repo_dir)},
+            )
+            assert created.status_code == 200, created.text
+            repo_id = created.json()["id"]
+
+            got = await client.post(f"/api/v1/repositories/{repo_id}/suggest")
+
+    assert got.status_code == 200, got.text
+    assert got.json()["provenance"] == {"provider": "openai", "model": "gpt-5.6-sol"}

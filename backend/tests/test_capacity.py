@@ -14,9 +14,31 @@ from app.sandboxes.capacity import RELAY_MB, effective_concurrency, max_parallel
 VM_7_65_GB = 7836  # what `docker info` reported on the machine that lost the run
 
 
-def test_the_measured_vm_allows_two_runs() -> None:
-    """7.65 GiB at 2 GiB per sandbox: two fit inside the 70% headroom."""
+def test_capacity_is_the_vm_divided_by_a_run(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Two 2 GiB sandboxes fit inside 7.65 GiB at 70% headroom; one 4 GiB does not.
+
+    Pinned to explicit sizes rather than reading the default, because the
+    default is a tunable and this is arithmetic: coupling them meant a
+    legitimate change to `sandbox_memory_mb` failed a test about division.
+    """
+    monkeypatch.setattr(settings, "sandbox_memory_mb", 2048)
     assert max_parallel_runs(VM_7_65_GB) == 2
+    monkeypatch.setattr(settings, "sandbox_memory_mb", 4096)
+    assert max_parallel_runs(VM_7_65_GB) == 1
+
+
+def test_the_current_default_holds_one_run_on_the_measured_vm() -> None:
+    """States the trade the 4 GiB default makes, so it is a decision on the
+    record rather than a surprise.
+
+    Sandboxes were raised to 4 GiB after a smolagents container was killed
+    mid-run with `exit 137, oom_killed=False`. That costs the second parallel
+    slot on this VM — headroom the project had already decided not to use, since
+    `queue_concurrency` is 1 and parallelism was reverted for making results
+    worse, not faster. Raising Docker Desktop's allocation buys it back.
+    """
+    assert max_parallel_runs(VM_7_65_GB) == 1
+    assert effective_concurrency(1, VM_7_65_GB) == 1
 
 
 def test_a_bigger_vm_allows_more() -> None:
@@ -30,7 +52,8 @@ def test_a_tiny_vm_clamps_to_one_never_zero() -> None:
     assert max_parallel_runs(1) == 1
 
 
-def test_configured_concurrency_is_clamped_to_capacity() -> None:
+def test_configured_concurrency_is_clamped_to_capacity(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(settings, "sandbox_memory_mb", 2048)
     assert effective_concurrency(8, VM_7_65_GB) == 2
     assert effective_concurrency(1, VM_7_65_GB) == 1, "never raised above what was asked for"
 

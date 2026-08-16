@@ -174,6 +174,43 @@ export default function RunDetail() {
                     color={ev.signal === 'ok' ? C.pass : C.warn}
                   />
                 </Box>
+                {/* The rubric verdict, legibly. It is in the raw dump below
+                    too, but "which criteria did this answer actually meet" is
+                    the whole result of a comprehension run and should not need
+                    reading JSON. */}
+                {results.judge && (
+                  <Box sx={{ mb: 2 }}>
+                    <Typography sx={{ fontSize: '0.82rem', color: C.dim, mb: 1 }}>
+                      {results.judge.rationale || 'graded against the task rubric'}
+                    </Typography>
+                    {(results.judge.met ?? []).map((c: string) => (
+                      <Typography key={c} sx={{ fontSize: '0.76rem', color: C.pass, mb: 0.3 }}>
+                        ✓ {c}
+                      </Typography>
+                    ))}
+                    {(results.judge.missing ?? []).map((c: string) => (
+                      <Typography key={c} sx={{ fontSize: '0.76rem', color: C.warn, mb: 0.3 }}>
+                        ✗ {c}
+                      </Typography>
+                    ))}
+                    {(results.judge.invented ?? []).length > 0 && (
+                      <Alert severity="warning" sx={{ mt: 1 }}>
+                        Named things that do not exist in this repository:{' '}
+                        {(results.judge.invented ?? []).join(', ')}
+                      </Alert>
+                    )}
+                    {results.judge.error && (
+                      <Alert severity="error" sx={{ mt: 1 }}>
+                        {results.judge.error}
+                      </Alert>
+                    )}
+                    <Typography
+                      sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.faint, mt: 1 }}
+                    >
+                      answer read from {results.answer_source} · {results.answer_chars} chars
+                    </Typography>
+                  </Box>
+                )}
                 {Object.entries(results).map(([name, value]) => (
                   <Box
                     key={name}

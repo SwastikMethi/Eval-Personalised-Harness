@@ -1,7 +1,7 @@
 ---
 tags: [aso/log]
 status: current
-updated: 2026-08-11
+updated: 2026-08-15
 ---
 
 # Session Log
@@ -263,6 +263,115 @@ Both original bugs are gone: `pandas` imports (containers) and `src` imports (`p
 **Self-inflicted, worth recording:** running the test suite beside a live batch destroyed all 8 of its runs. Container-creating tests live in three files, not the one obvious file, and excluding them by filename got it wrong. They carry a `docker` marker now — use `pytest -m "not docker"` while a run is in flight.
 
 **Next.** A repo with a runnable test suite. `Web_Scraper` and `Ai-Web-Scraper` produce patches but can never be scored — every run ends `INSUFFICIENT_EVALUATION_SIGNAL`, which is correct behaviour and also a dead end for ranking.
+
+---
+
+## 2026-08-14 — The analyzer was calling a dead key, and OpenAI speaks a different dialect
+
+**Why this came up.** A benchmark run against `Pokemon-Battle-Simulator` needed `POST /repositories/{id}/evaluation-strategy`, which returned a bare 500. The strategy ladder is the one call that decides whether a repo can be scored honestly at all, so a 500 there is not cosmetic.
+
+**First cause was not in the code.** `select_analyzer` walks `PREFERENCE = (anthropic, openai, openrouter, nvidia)` when `ANALYZER_PROVIDER=auto`. `ANTHROPIC_API_KEY` was **not** in `.env` — it was an exported shell variable inherited by the uvicorn process from an old LiteLLM setup, and pydantic-settings ranks process env **above** the `.env` file. So `auto` picked Anthropic and authenticated with a dead key. Worth remembering: `.env` is not the whole configuration surface, and `ps eww -p <pid>` is the way to see what the server actually got.
+
+Pinned with `ANALYZER_PROVIDER=openai` rather than by hunting the stale export — an explicit provider bypasses `PREFERENCE` entirely, so it is immune to whatever the shell is carrying.
+
+**Second cause was two vendor dialect mismatches**, [[Known Defects]] #17. gpt-5.x rejects both `max_tokens` and an explicit `temperature`; gpt-4.x accepts both. Measured, not assumed — the four-way probe is what made the fix per-model instead of per-vendor guesswork. `max_completion_tokens` turned out to work on *both* families, so that one is an unconditional rename; `temperature` genuinely varies, so it stays a model check.
+
+**Result:** the ladder now returns 200 in 20s via `openai / gpt-5.6-sol` — `repo_tests`, `scoreable: true`, `warn: true`, rung 1 (`commit_tests`) correctly rejected with `commit_test_files: 0`, rung 2 repairing a missing runner to parse 5 test cases.
+
+**And a finding worth more than the fix.** The ladder certifies this repo `scoreable: true`. Three of its five tests have bodies that are literally `pass` — they cannot distinguish a correct patch from a no-op — and the other two fail at baseline. `warn: true` is set, but a caller reading `scoreable` alone would rank a meaningless score. Correctness is 50% of the weighted score. Not filed as a defect yet because the right fix is a judgement call about what `scoreable` is *for*.
+
+**Also found, not fixed:** [[Known Defects]] #18 — preflight's `max_tokens=1` probe makes OpenAI return a 400 for reasoning models, which `probe` reads as permanently unusable. Repository analysis is unaffected (it asks for 1200), but an OpenAI benchmark combination would be silently deleted. One-line fix, but it changes probe cost for every provider, so it needs an explicit call under [[ADR-003 Free Tier Constraints]].
+
+**Verified.** 238 backend tests (`-m "not docker"`, the live server holds `data/aso.db`), lint and typecheck green. `tests/test_openai_provider.py` pins both wire spellings and that gpt-4.x keeps `temperature=0.0`. One flake seen and cleared: `test_relay.py::test_relay_waits_for_a_slow_response` failed once under full-suite load, passed 3/3 alone, and mentions nothing this change touched.
+
+**Caveat on "OpenAI only".** `POST /repositories/{id}/suggest-setup` is still hardcoded to `OpenRouterProvider` and 409s without `OPENROUTER_API_KEY` — the same bug `analyzer.py`'s docstring claims fixed, which was only fixed on `/evaluation-strategy`. Do not remove the OpenRouter key.
+
+---
+
+## 2026-08-14 — The repo gets a test that can actually fail
+
+**What changed.** Setup is now model-driven end to end, and the thing that grades an agent is proven rather than assumed.
+
+- **`/suggest` honours `ANALYZER_PROVIDER`.** It built an `OpenRouterProvider` directly and 409'd without that key, so two adjacent buttons in the wizard spent two different vendors' quota and only `/evaluation-strategy` obeyed the setting. Now both route through `select_analyzer`. Net −10 lines, plus `suggest_model` deleted as orphaned config.
+- **Generated hidden tests** (`tasks/generate_tests.py`, new). When a commit ships no tests of its own, a model writes one — and it is only offered if it **FAILS at the parent commit and PASSES at the solution commit**, checked per pytest case rather than by exit code. Up to 3 attempts, each rejection fed back as a nudge. A candidate that does not appear at all at the parent is rejected, not assumed to have failed: the usual cause is a module-level import of something that only exists after the fix, which breaks collection for the whole suite.
+- **Model-written task prompts** (`historical.ai_task_description`). The model reads the diff; the agent never does. The framing wrapper is unchanged and shared, and an **enforced** leak guard rejects diff syntax or three consecutive lines of the fix, falling back to the deterministic description.
+- **Test-environment repair** (`repositories/repair.py` + `POST /repositories/{id}/prepare-tests`). Only dependency manifests, test config and test files may change — enforced on the returned diff, because repairing `src/` would delete the bug the agent is asked to fix and hand every harness full marks. Kept only if it measurably improves the baseline, ranked usability-before-passing so a patch that breaks collection cannot look like an improvement.
+- **The fixup applies inside `materialize_workspace`**, which builds *both* the agent's workspace and the graded tree. Applying it at either call site instead would give the agent a different repository from the one that scores it, and nothing would fail — the numbers would just stop meaning anything.
+- **Unfailable tests no longer vote** (`detectors.vacuous_test_names` + `engine.py`). An AST pass names `test_*` functions whose body is only `pass`, a docstring or `...`; those cases are dropped from the correctness denominator but still watched for regressions.
+
+**Why.** `Pokemon-Battle-Simulator` has five tests: three whose bodies are `pass`, two already failing and therefore excluded as pre-existing. Nothing in it could distinguish a correct patch from an empty one, which is how `Update README.md` once scored 0.6.
+
+**Verified, live, against the running backend.** `/suggest` answered from `openai/gpt-5.6-sol` and narrowed 11 commits to **1** — `3e4e48de "corrected the server.py file"` — with a reason. Preparing that commit produced `tests/test_aso_generated_3e4e48d.py::test_mega_kick_is_available_in_the_offline_move_cache`, **failed at parent `939e8b61`, passed at `3e4e48de`**. First test in this repository capable of separating a correct patch from a no-op. Prompt came back present-tense and code-free, past the leak guard.
+
+**One bug found and fixed mid-verification.** The first live attempt returned an empty test file and gave up after one try: `GenerationError` conflated "model declined" with "model produced junk". Split into `NoBehaviouralChange` (do not retry — the diff will not change) versus everything else (retry). The emptiness itself was reasoning-token starvation at `max_tokens=1600` — see [[Known Defects]] #18, which this confirms is general rather than specific to the one-token probe.
+
+**Verify:** `make lint`, `make typecheck`, `pytest -m "not docker"` → **291 passed** (was 238; +53 new), `make demo` → 2 runs COMPLETED. Frontend `tsc --noEmit` clean and `npm run build` green.
+
+**Still true and still biting:** the repo commits `src/__pycache__/*.pyc` and `.log` files, which show up in the prompt's orientation list and previously broke `git apply`. Repo hygiene, not ours to fix.
+
+---
+
+## 2026-08-15 — A live 2×1 run found two ways the harness lies about a result
+
+**The run.** Experiment `e6240a5e`: `smolagents` vs `mini-swe-agent`, both on `nvidia/openai/gpt-oss-120b`, one task — commit `3e4e48de`. **Both FAILED, budget_exceeded, neither produced a patch.** Near-identical profiles: 8/8 requests succeeded, 0 failed, `rate_limited` false, 40,610 / 32,444 tokens in.
+
+It was launched through the pre-generation path: the prompt was the raw commit subject — *"corrected the server.py file"*, five words, past tense — and **no hidden tests were attached**. That is the prompt shape this log already records as producing "Acknowledged… please provide a specific task" and no edits. Two harnesses spent 16 successful model calls agreeing there was nothing to do.
+
+**Defect A — the failure message diagnosed a cause nobody measured.** `queue.py` wrote a constant on every budget exhaustion: *"the harness kept retrying a terminal 429 instead of stopping"*. True of the incident that prompted it, false here — 8 of 8 succeeded and nothing was throttled — and it cost real time chasing a rate-limit problem that did not exist. Now `budget_failure_message(usage)` composes from the counters already in scope: the retry-storm wording only when `failed_requests > 0` or `rate_limited`, otherwise what actually happened. Asserting an unmeasured cause is the same class of error as a fabricated metric, and it had been sitting in the one string a user reads when a run dies.
+
+**Defect B — pre-existing failures still sat in the score denominator, and I put them there.** Yesterday's change dropped unfailable tests from scoring. On this repo's baseline — three `pass` bodies plus two tests already broken — that moved the score from a falsely high **3/5 = 0.6** to a falsely low **0/2 = 0.0**. Inverting a bug is not fixing it. `engine.py` now excludes both kinds, using the `baseline_cases` that `_regressions` already consumes, and reports `excluded_unfailable` / `excluded_pre_existing` / `scoreable_cases` so the exclusion is visible.
+
+**And `has_signal` was answering the wrong question.** It was `report.parse_ok or bool(report.cases)` — output we could *read*, not output that *means* something. A suite of only unfailable and already-broken cases parses perfectly and distinguishes nothing. Now `bool(scoreable) or bool(regressions)`. This is what makes the fix land: `INSUFFICIENT_EVALUATION_SIGNAL` → `aggregate.py` marks the combination ineligible → no winner is drawn from noise, per the invariant in `CLAUDE.md`.
+
+**Verify:** `make lint` ✅ · `make typecheck` ✅ · `pytest -m "not docker"` → **297 passed** (+6) · `make demo` ✅. New: `tests/test_budget_message.py`, plus a case in `test_vacuous_tests.py` built from this repo's exact five-case baseline asserting the answer is *no signal* — not 0.6 and not 0.0.
+
+**To make a rerun mean anything:** press **Prepare & verify tests** before launching (that commit yields a test proven to fail at `939e8b61` and pass at `3e4e48de`), approve it, and raise the request budget above 8 — NVIDIA is credit-billed, so ADR-003's daily cap does not bind.
+
+---
+
+## 2026-08-15 — Let the agent stop when it is done, and measure the thing that kills it
+
+**Asked for:** remove the request limit and let agents self-terminate. Doing that naively would have produced *no benchmark at all*, for a reason nothing in the code made obvious.
+
+**The trap.** `aggregate.py` vetoes a combination on `timeout_rate > 0.5` **and** on `completed == 0`. `TIMED_OUT` is not `COMPLETED`. So the moment runs stop hitting a request ceiling and start hitting the clock, every combination becomes ineligible — however good its patch. Under a cap the same work ends COMPLETED, because `_end_budget_run` salvages it. The timeout path never got the equivalent, so **a timeout holding a gradeable patch now ends COMPLETED**, and the slowness is priced in `execution_efficiency` (15% of the weighted score) rather than used as an eligibility veto. A timeout with no patch is still a failure.
+
+Two things already worked and are worth recording so nobody re-derives them: `mini_swe_agent.py:112` extracts the patch unconditionally, timeout or not, and `queue.py:617` grades before the state branch. The 1800s timeout was always a safe backstop.
+
+**Requests were never the meter.** One measured run spent **3.0M input tokens across 100 requests** — every call resends the whole conversation, so 100 requests cost anywhere from 100k to 3M. `max_requests` is now nullable (uncapped), and `max_input_tokens` — which the proxy has always enforced at `proxy.py:186` and nobody ever set — is the guard, defaulting to 6M. Uncapped stays opt-in and is disabled for free-tier providers, because ADR-003's ~50 requests/day would go in one run.
+
+**Stated plainly: the premise is not yet true.** mini-swe-agent ran to the ceiling at 8 **and** at 100, with `--exit-immediately` set, context growing linearly the whole way. It has never once decided it was finished. Uncapped currently buys "runs until the clock", not "stops when done". The non-termination needs its own investigation.
+
+**The smolagents 137.** `capacity.py` already documented the signature — `exit 137, oom_killed=False` is a VM-level memory kill. Two gaps made it undiagnosable: `SandboxManager.stats()` collects `peak_memory` and **was never called**, and the "raise memory" hint fired only when `oom_killed` was True, precisely the flag this kill leaves false. Both fixed; `peak_memory` is now recorded on every run, and `sandbox_memory_mb` is 2048 → **4096**.
+
+**Trade made on the record:** 4 GiB sandboxes cost the second parallel slot on this 7.65 GiB VM (`max_parallel_runs` 2 → 1). That is headroom the project had already declined — `queue_concurrency` is 1 and `9974714` reverted parallelism for making results worse, not faster. Raising Docker Desktop's allocation buys it back. `test_capacity.py` now pins explicit sizes rather than the tunable default, so arithmetic tests stop failing on legitimate config changes.
+
+**Also fixed:** a retried run kept the previous attempt's `completed_at`, so a row read `started_at 12:40:45` against `completed_at 12:35:44` and every derived duration was negative. Cleared on both paths back to PENDING.
+
+**Verify:** `make lint` ✅ · `make typecheck` ✅ · `pytest` (**full suite, docker-marked included**) → **323 passed** · `make demo` ✅ · frontend `tsc` clean, `npm run build` green. First run of the docker-gated sandbox tests this session.
+
+---
+
+## 2026-08-15 — Supervised benchmarking: the analyzer proposes, the harnesses answer, the analyzer grades
+
+**Why.** Every route to an execution-based correctness signal on a real repo has failed, and each failure was in the repository rather than in the agents: three tests whose body is `pass`, no tests in any commit, generated tests that verify one hour and fail the next, and a graded container with no pytest in it. A question like *"trace the execution flow of the move lookup"* needs none of that infrastructure and still measures what a coding harness is for.
+
+**The pytest gap — the root cause of this morning's 0.0.** `requirements.txt` never mentions pytest. `baseline.py` noticed and installed it; the evaluator did not. So grading ran `pytest -v` in a container without pytest, died in 55 ms, collected nothing, and the three tests that passed at baseline looked like they had *vanished* — recorded as three regressions, which supplied a 0.0 that looked measured. Two harnesses were then ranked on a 0.0 vs 0.0 tie. Runner repair now lives in `evaluators/runner_repair.py` and both paths call it; a suite that collects nothing reports `suite_failed` and INSUFFICIENT_EVALUATION_SIGNAL instead of inventing regressions; and the evaluator finally keeps the failing output, which is why diagnosing this needed a manual `docker run`.
+
+**Comprehension tasks** (`tasks/propose.py`). The analyzer reads the digest and proposes architecture / execution-flow / feature-plan questions — **and writes the rubric in the same call, from the same digest**. That is what makes the grading grounded rather than vibes, and it means both harnesses are scored against an identical list. Every criterion cites a path, and **any criterion whose path is not in the real file tree is dropped before the rubric is stored** — a hallucinated rubric would otherwise mark every answer wrong with total confidence. Dropped criteria are surfaced, not hidden.
+
+**The judge** (`evaluators/judge.py`) is grounded and blind. It gets the answer, the rubric and the real file tree; it never gets the harness or model name, because ranking harnesses is the entire point. `invented` — names the answer claims exist and the tree does not contain — is a lookup, not an opinion. **The score is counted here from rubric hits, never taken from the model**: asked for an overall number, a model rounds its own impression up, and a criterion it invents cannot be credited because matches are checked against the rubric we sent.
+
+**Answers** arrive via `ANSWER.md` in the workspace, falling back to `final_message` — smolagents truncates that at 4000 chars, so the file has to come first. Theory tasks snapshot HEAD (there is no "before" state and nothing to leak).
+
+**ADR-005** records the reversal of *"do not use historical-patch similarity as a correctness metric"*, with its cost stated: a correct fix written differently from the original scores low. Judged diff averages with the test score rather than replacing it, and both halves are reported separately.
+
+**`POST /experiments/{id}/summary`** writes the plain-language comparison. Deliberately on demand — it costs a model call and would read differently on every page load.
+
+**The caveat that matters.** The judge cannot be pinned to temperature 0 (Known Defect #17), so scores are noisy. Results now carry that caveat automatically whenever any score came from a judge, and say to compare distributions across repetitions rather than two single numbers.
+
+**Verify:** `make lint` ✅ · `make typecheck` ✅ · `pytest` **342 passed** (full suite, docker included; was 323) · `make demo` ✅ · frontend build green.
+
+**Caught while verifying:** `npx tsc --noEmit` passed on a missing `Button` import that `npm run build` rejected. `make typecheck` does not catch every build failure — the same blind spot as the earlier MUI/vite break. Run the build before believing typecheck on frontend changes.
 
 ---
 

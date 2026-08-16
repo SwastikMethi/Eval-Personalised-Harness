@@ -36,6 +36,11 @@ class OpenAICompatibleProvider(ModelProvider):
     # True only for a provider whose listing genuinely marks models as free to
     # call. Credit-billed providers must not render as "$0.00".
     is_free_tier = False
+    # What this vendor calls the output-token cap on the wire. OpenAI's gpt-5
+    # family rejects `max_tokens` outright ("Unsupported parameter ... Use
+    # 'max_completion_tokens' instead") while NIM still expects the original
+    # name, so it is a per-vendor spelling rather than a caller's concern.
+    max_tokens_field = "max_tokens"
 
     def __init__(
         self,
@@ -124,7 +129,7 @@ class OpenAICompatibleProvider(ModelProvider):
         # plain chat.
         for key in ("temperature", "max_tokens", "tools", "tool_choice", "response_format"):
             if kwargs.get(key) is not None:
-                payload[key] = kwargs[key]
+                payload[self.max_tokens_field if key == "max_tokens" else key] = kwargs[key]
         try:
             async with self._client() as client:
                 resp = await client.post(f"{self._base_url}/chat/completions", json=payload)

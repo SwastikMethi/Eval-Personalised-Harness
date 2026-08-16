@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.harnesses.base import (
+    PATCH_EXTRACT_COMMAND,
     HarnessAdapter,
     HarnessRunRequest,
     HarnessRunResult,
@@ -71,7 +72,11 @@ try:
     steps = list(getattr(result, "steps", None) or [])
     out = {
         "status": "completed",
-        "final_message": str(getattr(result, "output", "") or "")[:4000],
+        # Was 4000, which silently cost a comprehension answer its marks: a run
+        # came back at exactly 3,996 characters — cut off mid-thought by this
+        # cap, then graded as if that was all the agent had to say. A final
+        # message is an ANSWER channel, not a log line.
+        "final_message": str(getattr(result, "output", "") or "")[:60000],
         "steps": len(steps),
         "tool_calls": sum(1 for s in steps if getattr(s, "tool_calls", None)),
     }
@@ -143,7 +148,7 @@ class SmolagentsHarness(HarnessAdapter):
         result = await self._manager.exec(run_id, cmd, timeout_s=request.timeout_seconds)
 
         patch_result = await self._manager.exec(
-            run_id, "git add -A && git diff --cached", timeout_s=120
+            run_id, PATCH_EXTRACT_COMMAND, timeout_s=120
         )
         patch = patch_result.stdout if patch_result.exit_code == 0 else None
 

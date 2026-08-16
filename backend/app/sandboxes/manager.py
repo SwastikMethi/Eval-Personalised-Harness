@@ -110,8 +110,16 @@ def _died_message(container: Any, run_id: str, command: str, exc: Exception) -> 
 
     Docker answers a exec-on-dead-container with a bare 409 Conflict quoting a
     64-char container id, which surfaced to the user verbatim and says nothing
-    about the cause. The exit code does: 137 with oom_killed means the agent
-    hit the memory limit, which is a config problem, not a harness bug.
+    about the cause. The exit code does: 137 means the agent was killed for
+    memory, which is a config problem, not a harness bug.
+
+    The hint used to require `oom_killed` — and that is exactly the flag this
+    kill does NOT set. `capacity.py` records why: a VM-level kernel kill leaves
+    the cgroup flag false and emits no `oom` event. So the case that most needed
+    the explanation was the one guaranteed not to get it, and a smolagents run
+    died with `137 oom_killed=False` and no guidance at all. Keyed on the exit
+    code now, and deliberately vague about WHICH limit, because without a
+    recorded peak_memory we genuinely do not know.
     """
     state: dict[str, Any] = {}
     try:
@@ -125,12 +133,19 @@ def _died_message(container: Any, run_id: str, command: str, exc: Exception) -> 
             f"(command: {command[:120]}). Underlying error: {exc}"
         )
     oom = state.get("OOMKilled")
-    detail = f"status={state.get('Status')} exit_code={state.get('ExitCode')} oom_killed={oom}"
-    hint = (
-        " — the container exceeded its memory limit; raise SandboxLimits.memory_mb"
-        if oom
-        else ""
-    )
+    exit_code = state.get("ExitCode")
+    detail = f"status={state.get('Status')} exit_code={exit_code} oom_killed={oom}"
+    if oom:
+        hint = " — the container exceeded its own memory limit; raise sandbox_memory_mb"
+    elif exit_code == 137:
+        hint = (
+            " — killed for memory (SIGKILL). oom_killed=False does not rule this out: a"
+            " VM-level kill leaves that flag false (see sandboxes/capacity.py). Check the"
+            " run's peak_memory against sandbox_memory_mb, and the VM's total against the"
+            " containers alive at the time"
+        )
+    else:
+        hint = ""
     return (
         f"sandbox container for {run_id} exited before the command could run "
         f"({detail}){hint}. Command: {command[:120]}"

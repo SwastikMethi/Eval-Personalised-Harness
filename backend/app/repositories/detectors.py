@@ -2,6 +2,7 @@
 reported as detected-but-unsupported.
 """
 
+import ast
 import json
 import re
 from dataclasses import dataclass, field
@@ -151,3 +152,44 @@ def analyze_repository(root: Path) -> AnalysisResult:
         f.stat().st_size for f in root.rglob("*") if f.is_file() and ".git" not in f.parts
     )
     return result
+
+
+def _is_vacuous(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """A body of only `pass`, a docstring, or `...` — nothing that can fail."""
+    for statement in node.body:
+        if isinstance(statement, ast.Pass):
+            continue
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant):
+            continue  # docstring or a bare `...`
+        return False
+    return True
+
+
+def vacuous_test_names(root: Path) -> set[str]:
+    """Test functions that succeed no matter what the code does.
+
+    Three of these in a five-test suite is what let an agent score 0.6 for
+    editing a README: the two real tests were already failing and so excluded
+    as pre-existing, leaving nothing behind the correctness number but
+    statements that cannot fail.
+
+    They are named rather than counted because the caller drops them from the
+    score's denominator, and a count cannot say which cases to drop. Best
+    effort by design — a file that will not parse is not a scoring question.
+    """
+    names: set[str] = set()
+    for path in root.rglob("*.py"):
+        if ".git" in path.parts:
+            continue
+        try:
+            tree = ast.parse(path.read_text(errors="replace"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+                and node.name.startswith("test")
+                and _is_vacuous(node)
+            ):
+                names.add(node.name)
+    return names

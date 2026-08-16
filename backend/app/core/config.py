@@ -46,9 +46,13 @@ class Settings(BaseSettings):
     analyzer_provider: str = "auto"
     analyzer_model: str = ""
 
-    # Model used for AI-assisted setup suggestions (one request per press).
-    # A code-oriented free model; overridable per request from the UI.
-    suggest_model: str = "cohere/north-mini-code:free"
+    # The ceiling that bounds an uncapped run. Requests are a poor meter for
+    # spend — one measured run cost 3.0M input tokens across 100 calls, because
+    # every call resends the whole conversation — so when the request cap is
+    # lifted this is what stops a looping agent. Sized at roughly twice the
+    # worst run observed, so a genuinely long task finishes and a runaway does
+    # not. Set per experiment via config["max_input_tokens"].
+    default_max_input_tokens: int = 6_000_000
     # Base image for agent sandboxes and for baseline/evaluation containers.
     # Per-repo "prepared" images are built FROM this with deps pre-installed.
     eval_image: str = "aso-sandbox-python:dev"
@@ -71,7 +75,12 @@ class Settings(BaseSettings):
     # 7.65 GiB Docker VM once the agent and evaluation containers coexisted, and
     # runs were killed with exit 137 / oom_killed=False. A sandbox runs pip,
     # a test suite and one agent process.
-    sandbox_memory_mb: int = 2048
+    # Raised from 2048 after a smolagents container was killed with
+    # `exit 137, oom_killed=False` mid-run. capacity.py records that signature
+    # as a memory kill; which limit was hit is unknown because peak_memory was
+    # never recorded (now it is). The VM holds 7,836 MB and concurrency is 1, so
+    # 4,096 + a 128 MB relay still leaves capacity.max_parallel_runs() >= 1.
+    sandbox_memory_mb: int = 4096
     # Fraction of the VM's memory the runs may claim; the rest is headroom for
     # the daemon, image builds and the relay containers.
     sandbox_memory_headroom: float = 0.7

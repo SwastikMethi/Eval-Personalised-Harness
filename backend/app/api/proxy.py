@@ -34,7 +34,12 @@ class RunToken:
     token: str
     model_id: str
     expires_at: float
-    max_requests: int = 50
+    # None means uncapped: let the agent stop when it is finished rather than
+    # when it runs out of allowance. The wall-clock timeout is then the backstop,
+    # and `max_input_tokens` below is what actually bounds spend — a request
+    # count does not, since 100 calls cost anywhere from 100k to 3M tokens
+    # depending on how much history the harness resends.
+    max_requests: int | None = 50
     max_input_tokens: int | None = None
     max_output_tokens: int | None = None
     max_cost_usd: float | None = None
@@ -96,7 +101,7 @@ def provider_for(name: str) -> ModelProvider:
 def issue_run_token(
     run_id: str,
     model_id: str,
-    max_requests: int = 50,
+    max_requests: int | None = 50,
     max_input_tokens: int | None = None,
     max_output_tokens: int | None = None,
     max_cost_usd: float | None = None,
@@ -145,7 +150,10 @@ def run_usage(run_id: str) -> dict[str, Any]:
         # Attempts include calls that returned nothing; `requests` does not.
         # Both are reported so a refund never hides provider flakiness.
         "attempted": entry.attempted,
-        "budget_exhausted": entry.requests >= entry.max_requests,
+        "budget_exhausted": (
+            entry.max_requests is not None and entry.requests >= entry.max_requests
+        )
+        or bool(entry.max_input_tokens and entry.input_tokens >= entry.max_input_tokens),
     }
 
 
@@ -181,7 +189,7 @@ def _authorize(authorization: str, model_id: str) -> RunToken:
                 raise HTTPException(401, "run token expired")
             if entry.model_id != model_id:
                 raise HTTPException(403, "model not pinned for this run")
-            if entry.requests >= entry.max_requests:
+            if entry.max_requests is not None and entry.requests >= entry.max_requests:
                 raise _budget_exhausted("run request budget exceeded")
             if entry.max_input_tokens and entry.input_tokens >= entry.max_input_tokens:
                 raise _budget_exhausted("run input-token budget exceeded")

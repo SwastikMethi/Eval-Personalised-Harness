@@ -154,17 +154,26 @@ async def suggest_setup_endpoint(
 
     Runs server-side rather than through the run-scoped proxy: there is no run
     here, and the API key must not leave the backend either way.
+
+    Uses the SAME analyzer as /evaluation-strategy. This endpoint used to build
+    an OpenRouter provider directly and 409 without that key, so two adjacent
+    buttons in the wizard silently spent two different vendors' quota and
+    ANALYZER_PROVIDER only governed one of them.
     """
     from app.core.config import settings as cfg
-    from app.providers.openrouter import OpenRouterProvider
+    from app.repositories import analyzer as analyzer_mod
     from app.repositories import digest as digest_mod
     from app.repositories import suggest as suggest_mod
 
-    if not cfg.openrouter_api_key:
-        raise HTTPException(409, "OPENROUTER_API_KEY not configured — set it in .env")
-
     repo = _repo_or_404(repo_id, session)
     root = _repo_root(repo)
+
+    try:
+        analyzer = analyzer_mod.select_analyzer(cfg, body.model_id if body else None)
+        model_id = await analyzer_mod.resolve_model(analyzer)
+    except analyzer_mod.AnalyzerUnavailable as exc:
+        raise HTTPException(409, str(exc)) from exc
+
     try:
         commits = service.list_commits(root, limit=digest_mod.MAX_COMMITS)
     except service.RepositoryError:
@@ -181,15 +190,10 @@ async def suggest_setup_endpoint(
         },
     }
 
-    provider = OpenRouterProvider(
-        api_key=cfg.openrouter_api_key,
-        base_url=cfg.openrouter_base_url,
-        http_referer=cfg.openrouter_http_referer,
-        app_name=cfg.openrouter_app_name,
-    )
-    model_id = (body.model_id if body else None) or cfg.suggest_model
     try:
-        suggestion = await suggest_mod.suggest_setup(provider, model_id, bundle, hint)
+        suggestion = await suggest_mod.suggest_setup(
+            analyzer.provider, model_id, bundle, hint
+        )
     except suggest_mod.SuggestionError as exc:
         raise HTTPException(422, str(exc)) from exc
     except ProviderError as exc:
@@ -198,6 +202,10 @@ async def suggest_setup_endpoint(
     by_sha = {c["sha"]: c for c in commits}
     return {
         "model_id": suggestion.model_id,
+        # Which vendor actually answered. Without it, "the AI suggested this"
+        # is unattributable — and this endpoint answered from a different
+        # provider than its neighbour for long enough to matter.
+        "provenance": analyzer.provenance,
         "confidence": suggestion.confidence,
         "commands": {**suggestion.commands, "test_framework": suggestion.test_framework},
         "rationale": suggestion.rationale,
@@ -253,6 +261,130 @@ def latest_baseline(repo_id: str, session: Session = Depends(get_session)) -> di
 
 class AnalyzeIn(BaseModel):
     model_id: str | None = None
+
+
+def _signal(benchmarkable: bool, cases: Any) -> tuple[int, int]:
+    """(usable, passing) — compared lexicographically, higher is better.
+
+    A suite that does not run at all reports zero failures, which naively looks
+    better than one that runs and fails. Ranking usability first stops a repair
+    that breaks collection from being recorded as an improvement.
+    """
+    passed = sum(1 for entry in (cases or []) if tuple(entry)[1] == "passed")
+    return (1 if benchmarkable else 0, passed)
+
+
+@router.post("/repositories/{repo_id}/prepare-tests")
+async def prepare_tests_endpoint(
+    repo_id: str, body: AnalyzeIn | None = None, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    """Make the repo's own suite runnable — without fixing the bug (spec §7).
+
+    Only test configuration, dependency manifests and test files may change;
+    `app/repositories/repair.py` enforces that on the returned diff rather than
+    asking for it, because repairing application source would delete the very
+    bug an agent is asked to fix and hand every harness full marks.
+
+    The patch is kept only if it measurably improves the baseline, and it is
+    then applied to the agent's workspace AND the graded tree alike.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from app.core.config import settings as cfg
+    from app.repositories import analyzer as analyzer_mod
+    from app.repositories import repair as repair_mod
+
+    repo = _repo_or_404(repo_id, session)
+    root = _repo_root(repo)
+
+    before = session.scalars(
+        select(BaselineResult)
+        .where(BaselineResult.repository_id == repo_id)
+        .order_by(BaselineResult.created_at.desc())
+    ).first()
+    if before is None:
+        raise HTTPException(409, "run a baseline first — there is nothing to compare against")
+
+    commands = session.scalars(
+        select(RepositoryCommand).where(RepositoryCommand.repository_id == repo_id)
+    ).first()
+    if commands is None:
+        raise HTTPException(409, "analyze the repository first to detect commands")
+
+    try:
+        analyzer = analyzer_mod.select_analyzer(cfg, body.model_id if body else None)
+        model_id = await analyzer_mod.resolve_model(analyzer)
+    except analyzer_mod.AnalyzerUnavailable as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+    try:
+        patch = await repair_mod.propose_repair(
+            analyzer.provider, model_id, root, before.steps or {}, []
+        )
+    except repair_mod.RepairError as exc:
+        return {
+            "applied": False,
+            "reason": str(exc),
+            "provenance": analyzer.provenance,
+            "changed_paths": [],
+        }
+    except ProviderError as exc:
+        raise HTTPException(502, f"[{exc.category}] {exc}") from exc
+
+    command_map = {
+        "install": commands.install,
+        "build": commands.build,
+        "test": commands.test,
+    }
+    workdir = Path(tempfile.mkdtemp(prefix="aso-repair-"))
+    snapshot = workdir / "snapshot"
+    try:
+        _, commit = service.head_info(root)
+        service.create_snapshot(root, commit, snapshot)
+        applied, apply_error = repair_mod.apply_patch(snapshot, patch)
+        if not applied:
+            return {
+                "applied": False,
+                "reason": f"patch does not apply cleanly: {apply_error}",
+                "provenance": analyzer.provenance,
+                "changed_paths": repair_mod.patched_paths(patch),
+            }
+        after = run_baseline_in_sandbox(
+            snapshot, command_map, commands.test_framework, repo_id
+        )
+    except service.RepositoryError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    finally:
+        import shutil
+
+        shutil.rmtree(workdir, ignore_errors=True)
+
+    before_signal = _signal(before.benchmarkable, before.test_cases)
+    after_signal = _signal(after.benchmarkable, after.test_cases)
+    if after_signal <= before_signal:
+        # Kept honest: a patch that did not help is discarded rather than saved
+        # on the strength of having applied cleanly.
+        return {
+            "applied": False,
+            "reason": (
+                f"patch did not improve the baseline "
+                f"(usable/passing {before_signal} → {after_signal})"
+            ),
+            "provenance": analyzer.provenance,
+            "changed_paths": repair_mod.patched_paths(patch),
+        }
+
+    repair_mod.save_fixup(repo_id, patch)
+    return {
+        "applied": True,
+        "reason": "",
+        "provenance": analyzer.provenance,
+        "changed_paths": repair_mod.patched_paths(patch),
+        "before": {"benchmarkable": before.benchmarkable, "passing": before_signal[1]},
+        "after": {"benchmarkable": after.benchmarkable, "passing": after_signal[1]},
+        "patch": patch,
+    }
 
 
 # NOT /analyze — that is already the deterministic detector sweep above, and a
