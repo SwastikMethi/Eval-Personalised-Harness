@@ -559,7 +559,7 @@ class QueueWorker:
                 # dependencies, so its PREP install is a no-op instead of
                 # minutes repeated for every run in the matrix.
                 image = await asyncio.to_thread(
-                    self._prepared_image, workspace, config, task.repository_id
+                    self._prepared_image, workspace, config, task.repository_id, task.kind
                 )
                 await self._sandboxes.create(run_id, workspace, image=image)
                 await self._sandboxes.seal(run_id)
@@ -1067,11 +1067,22 @@ class QueueWorker:
                 session.commit()
 
     @staticmethod
-    def _prepared_image(workspace: Path, config: dict[str, Any], repo_id: str) -> str | None:
+    def _prepared_image(
+        workspace: Path,
+        config: dict[str, Any],
+        repo_id: str,
+        task_kind: str | None = None,
+    ) -> str | None:
         """Image with this repo's dependencies baked in, or None for the default."""
         from app.sandboxes.manager import docker_available
         from app.sandboxes.prepared import ensure_prepared_image
 
+        # A comprehension agent reads the code; it never installs, builds or
+        # runs a suite. Building its dependencies would be minutes spent on
+        # something the run cannot use — and on a repo whose install does not
+        # work in the sandbox, minutes spent failing.
+        if task_kind == "theory":
+            return None
         install = (config.get("commands") or {}).get("install")
         if not install or not docker_available():
             return None

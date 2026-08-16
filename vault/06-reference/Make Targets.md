@@ -45,7 +45,13 @@ uv run alembic current
 
 - [uv](https://docs.astral.sh/uv/), Node 20+, Docker, macOS/Linux
 - `cp .env.example .env` and add `OPENROUTER_API_KEY`
-- Sandbox image: `aso-sandbox-python:dev` (built from `sandbox-images/python/Dockerfile`)
+- Sandbox image: `make sandbox-image` → `aso-sandbox-python:dev`, from
+  `sandbox-images/python/Dockerfile`
+
+> **Rebuild after editing that Dockerfile.** Nothing does it for you, and a stale
+> image surfaces as `command not found` inside a container rather than as
+> anything that points at the image. It now carries `make`, `build-essential`
+> and `uv` as well as git and Node — see [[Sandbox]].
 
 ## Per-phase verification loop (§29)
 

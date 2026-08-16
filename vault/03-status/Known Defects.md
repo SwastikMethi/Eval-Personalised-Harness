@@ -201,6 +201,28 @@ Now scoped to the test's own experiment via `ExperimentCombination`, matching th
 
 ---
 
+## 19. A monorepo's dependencies never reached the image 🔴 ✅ FIXED (2026-08-17)
+
+`Eval-Personalised-Harness` failed its baseline with `make: not found`. The missing `make` was the visible defect and the least of three; the build log said `transferring context: 138B`, which is the generated Dockerfile and nothing else.
+
+Manifests were discovered **root-only** (`root / "pyproject.toml"`) and copied **flattened** to their basename. A repo keeping `backend/pyproject.toml` and `frontend/package.json` therefore contributed nothing to the build context, and `cd backend && uv sync` could never have found its file even with `make` present. `detectors.py` shares the root-only assumption, which is why the same repo detects as "python" with no package manager.
+
+Now `sandboxes/environment.py` searches one directory deep, preserves paths, and resolves system packages from a fixed allowlist. `make`, `build-essential` and `uv` joined the base image (`make sandbox-image`).
+
+## 20. The prepared image cached work the mount then erased 🟠 ✅ FIXED (2026-08-17)
+
+Found while verifying #19. Every container bind-mounts the host workspace over `/workspace`, so anything the image wrote *there* is hidden the instant the container starts. `pip install` reaches site-packages and survives — that is the case the cache was designed for — but `uv sync` writes `.venv` and `npm install` writes `node_modules` inside the project, and both are erased.
+
+So for uv and npm repos the cache was not merely useless: a full `make setup` build measured **over ten minutes** of uv and npm work, discarded on every cache miss, before a test step that then could not see any of it. Those installs now skip the image and run in-container, where the result persists into the test step.
+
+## 21. A failed install reported the repo unbenchmarkable 🟠 ✅ FIXED (2026-08-17)
+
+`run_baseline` returned `benchmarkable=False` the moment the prebuilt install failed, without attempting the suite. That reported `make: not found` — a gap in **our** sandbox image — as "this repository cannot be scored", and threw away stdlib-only or vendored repos whose tests pass with no install at all.
+
+Now `missing_tool()` names the executable from the exit-127 output, the step carries a `diagnosis` the UI renders, and `warn` is set instead of halting. A suite that genuinely cannot run still yields no signal, so this degrades rather than papers over.
+
+---
+
 ## Severity key
 
 🔴 blocks a correct benchmark result · 🟠 blocks correctness on real repos or lies about status

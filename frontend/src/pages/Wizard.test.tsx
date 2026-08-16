@@ -102,6 +102,89 @@ async function reachReview() {
   return user
 }
 
+const PROPOSED = {
+  provenance: { provider: 'openai', model: 'gpt-5.6-sol' },
+  tasks: [
+    {
+      id: 'theory1',
+      title: 'Explain the run lifecycle',
+      category: 'execution_flow',
+      rubric: [{ criterion: 'names the queue worker', evidence: 'queue.py', depth: 'structural' }],
+      dropped: [],
+    },
+  ],
+}
+
+/**
+ * Repo → propose comprehension questions → tick one → Review.
+ *
+ * Deliberately never touches a commit, because that is the whole condition:
+ * a rubric-graded matrix needs no test suite and no baseline.
+ */
+async function reachReviewViaTheory() {
+  // The commit shortlist fires automatically on reaching Tasks; without a
+  // handler MSW retries it and the flow stalls.
+  server.use(
+    http.post('/api/v1/repositories/:id/suggest', () =>
+      HttpResponse.json({
+        model_id: 'gpt-5.6-sol',
+        confidence: 'high',
+        commands: {},
+        rationale: {},
+        commits: [],
+        files_read: [],
+      }),
+    ),
+  )
+  const user = userEvent.setup()
+  renderScreen(<Wizard />)
+  await user.type(screen.getByPlaceholderText(/Projects\/your-repo/), '/tmp/repo')
+  await user.click(screen.getByRole('button', { name: /Analyze repository/ }))
+
+  await user.click(await screen.findByRole('button', { name: /Understand the code/ }))
+  await user.click(await screen.findByRole('button', { name: /Propose questions/ }))
+  await user.click(await screen.findByLabelText(/Explain the run lifecycle/))
+  await user.click(await screen.findByRole('button', { name: /^Continue$/ }))
+
+  await openPicker(user)
+  await user.click(await screen.findByLabelText(/mini-swe-agent/))
+  await user.click(await screen.findByLabelText(/gpt-oss-20b/))
+  await user.click(screen.getByRole('button', { name: /^Done$/ }))
+  await user.click(await screen.findByRole('button', { name: /^Continue$/ }))
+  return user
+}
+
+describe('Comprehension-only matrix', () => {
+  it('never runs a baseline, and never blocks on one', { timeout: 30_000 }, async () => {
+    let baselineCalls = 0
+    mockRepo({ analysis: { ...ANALYSIS, commands: { test: null, test_framework: null } } })
+    server.use(
+      http.post('/api/v1/repositories/:id/baseline', () => {
+        baselineCalls += 1
+        return HttpResponse.json(BASELINE)
+      }),
+      http.post('/api/v1/repositories/:id/propose-tasks', () => HttpResponse.json(PROPOSED)),
+    )
+
+    await reachReviewViaTheory()
+
+    // Startable despite no test command and no baseline — the rubric is the signal.
+    expect(await screen.findByRole('button', { name: /Start 1 run/ })).toBeEnabled()
+    expect(screen.queryByText(/no correctness signal without one/)).not.toBeInTheDocument()
+    // And the container work was never paid for.
+    expect(baselineCalls).toBe(0)
+  })
+
+  it('says why setup is empty rather than looking unconfigured', { timeout: 30_000 }, async () => {
+    mockRepo()
+    server.use(
+      http.post('/api/v1/repositories/:id/propose-tasks', () => HttpResponse.json(PROPOSED)),
+    )
+    await reachReviewViaTheory()
+    expect(await screen.findByText(/no test suite, no patch/)).toBeInTheDocument()
+  })
+})
+
 describe('Setup wizard', () => {
   it('reaches the combos step without ever asking for build or typecheck', async () => {
     mockRepo()

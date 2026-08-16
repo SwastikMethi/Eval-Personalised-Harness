@@ -60,7 +60,9 @@ export interface BaselineOutcome {
   base_commit: string
   benchmarkable: boolean
   warn: boolean
-  steps: Record<string, { exit_code: number; output?: string }>
+  // `diagnosis` is present when the backend could name the cause — a tool the
+  // sandbox image lacks, say — rather than only handing back a build log.
+  steps: Record<string, { exit_code: number; output?: string; diagnosis?: string }>
   test_case_count: number
 }
 

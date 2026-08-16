@@ -152,9 +152,16 @@ def test_baseline_through_the_container_executor(tmp_path: Path) -> None:
 # --- honest degradation -----------------------------------------------------
 
 
-def test_prebuilt_install_failure_blocks_and_keeps_its_log() -> None:
+def test_prebuilt_install_failure_warns_and_keeps_its_log() -> None:
     """A failed image build is the repo's install failing; it must read as
-    that, with the log, not as an opaque build error."""
+    that, with the log, not as an opaque build error.
+
+    It used to also END the baseline. That threw away repos which are
+    stdlib-only or vendored and pass their suite with no install at all, and it
+    reported `make: not found` — a gap in our sandbox image — as "this
+    repository cannot be scored". The install failure is now a warning carried
+    alongside the result; the test step decides whether there is a signal.
+    """
     build = CommandResult(
         command="pip install -r requirements.txt",
         exit_code=1,
@@ -164,9 +171,10 @@ def test_prebuilt_install_failure_blocks_and_keeps_its_log() -> None:
     )
     outcome = run_baseline(Path("/tmp"), {"test": "true"}, "pytest", prebuilt_install=build)
 
-    assert outcome.benchmarkable is False
     assert "nonexistent-pkg" in outcome.steps["install"]["stdout"]
-    assert "test" not in outcome.steps, "must not run tests after install failed"
+    assert outcome.steps["install"]["exit_code"] == 1
+    assert outcome.warn is True, "a partial environment must never look clean"
+    assert "test" in outcome.steps, "the suite decides the signal, not the install"
 
 
 def test_prebuilt_install_success_is_not_run_twice() -> None:

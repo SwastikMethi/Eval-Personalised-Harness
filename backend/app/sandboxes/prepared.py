@@ -13,6 +13,14 @@ The install command still runs inside the container afterwards. Normally it is
 a fast "Requirement already satisfied" no-op; if an agent's patch ADDS a
 dependency it installs just that one. That is what makes caching safe rather
 than a source of stale-environment bugs.
+
+The saving only exists for installers that write OUTSIDE the project directory.
+Every container bind-mounts the host workspace over /workspace, so an image
+that populated `.venv` or `node_modules` in there has its work hidden the
+instant the container starts. `pip install` lands in site-packages and
+survives; `uv sync` and `npm install` do not. For those the build is skipped
+entirely — see `environment.installs_into_workspace` — because spending minutes
+producing a layer the mount discards is worse than not caching at all.
 """
 
 import hashlib
@@ -25,35 +33,26 @@ import time
 from pathlib import Path
 
 from app.core.config import settings
+from app.sandboxes.environment import (
+    DEPENDENCY_MANIFESTS,
+    EnvironmentSpec,
+    discover_files,
+    installs_into_workspace,
+    resolve_environment,
+)
 from app.sandboxes.exec import MAX_OUTPUT_BYTES, CommandResult
 
 log = logging.getLogger(__name__)
 
-# Files whose contents decide what gets installed. A change here means a
-# different environment, so a different image.
-DEPENDENCY_MANIFESTS = (
-    "requirements.txt",
-    "requirements-dev.txt",
-    "requirements_dev.txt",
-    "dev-requirements.txt",
-    "pyproject.toml",
-    "poetry.lock",
-    "uv.lock",
-    "setup.py",
-    "setup.cfg",
-    "Pipfile",
-    "Pipfile.lock",
-    "package.json",
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-    "go.mod",
-    "go.sum",
-    "Cargo.toml",
-    "Cargo.lock",
-    "Gemfile",
-    "Gemfile.lock",
-)
+# Re-exported: the canonical list now lives in environment.py alongside the
+# build files and the package allowlist that are resolved from it.
+__all__ = [
+    "DEPENDENCY_MANIFESTS",
+    "ensure_prepared_image",
+    "image_tag",
+    "manifest_files",
+    "manifest_hash",
+]
 
 BUILD_TIMEOUT_S = 1800
 
@@ -67,22 +66,40 @@ def _lock_for(tag: str) -> threading.Lock:
 
 
 def manifest_files(root: Path) -> list[Path]:
-    """Manifests present at the repo root, in a stable order."""
-    return [root / name for name in DEPENDENCY_MANIFESTS if (root / name).is_file()]
+    """Absolute paths of the files this repo's install command reads.
+
+    Delegates to `environment.discover_files`, which searches one directory
+    deep. The previous root-only version returned [] for any repo keeping its
+    manifests in `backend/` or `frontend/`, so the build context held nothing
+    but the generated Dockerfile.
+    """
+    return [root / rel for rel in discover_files(root)]
 
 
-def manifest_hash(root: Path, install_cmd: str) -> str:
-    """Identity of the environment: the manifests plus the command that reads them."""
+def manifest_hash(root: Path, install_cmd: str, spec: EnvironmentSpec | None = None) -> str:
+    """Identity of the environment.
+
+    Covers the manifests, the command that reads them, AND the resolved system
+    packages — otherwise changing the package set would silently reuse an image
+    built without it.
+    """
+    resolved = spec or resolve_environment(root, install_cmd)
     digest = hashlib.sha256()
     digest.update(install_cmd.encode())
-    for path in manifest_files(root):
-        digest.update(path.name.encode())
-        digest.update(path.read_bytes())
+    digest.update(resolved.identity().encode())
+    for rel in resolved.copy_paths:
+        digest.update(str(rel).encode())
+        try:
+            digest.update((root / rel).read_bytes())
+        except OSError:
+            digest.update(b"<unreadable>")
     return digest.hexdigest()[:16]
 
 
-def image_tag(repo_id: str, root: Path, install_cmd: str) -> str:
-    return f"aso-prepared:{repo_id[:12]}-{manifest_hash(root, install_cmd)}"
+def image_tag(
+    repo_id: str, root: Path, install_cmd: str, spec: EnvironmentSpec | None = None
+) -> str:
+    return f"aso-prepared:{repo_id[:12]}-{manifest_hash(root, install_cmd, spec)}"
 
 
 def _image_exists(tag: str) -> bool:
@@ -106,7 +123,18 @@ def ensure_prepared_image(
     if not install_cmd or not install_cmd.strip():
         return base, None
 
-    tag = image_tag(repo_id, root, install_cmd)
+    # Nothing to cache: the runtime bind-mount over /workspace would hide
+    # whatever this wrote. The caller runs it as a normal in-container step
+    # instead, where the test step can see the result.
+    if installs_into_workspace(install_cmd):
+        log.info(
+            "skipping prepared image: install writes into the workspace",
+            extra={"install": install_cmd},
+        )
+        return base, None
+
+    spec = resolve_environment(root, install_cmd)
+    tag = image_tag(repo_id, root, install_cmd, spec)
     with _lock_for(tag):
         if _image_exists(tag):
             return tag, None
@@ -114,12 +142,26 @@ def ensure_prepared_image(
         start = time.monotonic()
         context = Path(tempfile.mkdtemp(prefix="aso-prep-"))
         try:
-            for path in manifest_files(root):
-                shutil.copy2(path, context / path.name)
+            # Structure preserved. Copying to `path.name` flattened
+            # backend/pyproject.toml to pyproject.toml, so an install command
+            # that begins `cd backend` could never find it.
+            for rel in spec.copy_paths:
+                target = context / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(root / rel, target)
+
+            apt = ""
+            if spec.system_packages:
+                packages = " ".join(spec.system_packages)
+                apt = (
+                    "RUN apt-get update && apt-get install -y --no-install-recommends "
+                    f"{packages} && rm -rf /var/lib/apt/lists/*\n"
+                )
             (context / "Dockerfile").write_text(
                 f"FROM {base}\n"
                 "USER root\n"
                 "WORKDIR /workspace\n"
+                f"{apt}"
                 "COPY . /workspace/\n"
                 # Failing here is the repo's install failing; the caller
                 # reports it as such rather than as a build error.

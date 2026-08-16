@@ -56,6 +56,19 @@ Both mini-SWE-agent and (planned) smolagents are installed **in the sandbox imag
 
 This constraint is why OpenHands is hard — it normally spawns its *own* Docker runtime, which needs a socket we deliberately do not mount. See [[ADR-001 Harness Choice]].
 
+It is also why a repo's own Dockerfile is never built: its `FROM` would discard the harnesses along with the sandbox user and git config. A repo Dockerfile is *read* for the packages it apt-installs, as evidence for the per-repo layer below, and nothing more.
+
+## The per-repo layer
+
+`sandboxes/environment.py` resolves what a repo needs before its own install command can run — system packages from a **fixed allowlist**, plus the manifests and build files to copy. `prepared.py` turns that into one cached image per repo.
+
+Two properties are easy to get wrong, and both were:
+
+- **Search one directory deep, and preserve paths.** Manifests were found root-only and copied flattened to their basename, so a repo keeping `backend/pyproject.toml` contributed *nothing* to the build context and `cd backend && uv sync` could never work. `Eval-Personalised-Harness` failed with a 138-byte context — the generated Dockerfile alone.
+- **Only cache what the mount cannot hide.** Containers bind-mount the host workspace over `/workspace`. `pip install` populates site-packages and survives; `uv sync` and `npm install` write `.venv` and `node_modules` *inside* the project and are erased the moment the container starts. For those the image build is skipped entirely and the install runs in-container instead — see `installs_into_workspace`.
+
+A failed install no longer ends the baseline. It names the missing tool, warns, and lets the test step decide whether there is a signal: plenty of repos are stdlib-only and score fine with no install at all.
+
 ## Honest security limitation
 
 Local Docker sandboxing is appropriate for **trusted** MVP testing. It is *not* hardened multi-tenant isolation: containers share the host kernel, evaluation commands currently run on the host, and the backend is unauthenticated localhost.

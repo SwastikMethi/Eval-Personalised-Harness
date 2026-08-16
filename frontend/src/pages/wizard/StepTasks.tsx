@@ -86,9 +86,9 @@ export default function StepTasks({ w }: { w: Wizard }) {
               >
                 <Check
                   align="start"
-                  checked={w.describedTaskIds.includes(t.id)}
+                  checked={w.theoryTaskIds.includes(t.id)}
                   onChange={(on) =>
-                    w.setDescribedTaskIds((prev) =>
+                    w.setTheoryTaskIds((prev) =>
                       on ? [...prev, t.id] : prev.filter((x) => x !== t.id),
                     )
                   }
@@ -240,6 +240,9 @@ export default function StepTasks({ w }: { w: Wizard }) {
           <Row gap={space[2]}>
             {w.selectedShas.map((s) => (
               <Status key={s}>{s.slice(0, 8)}</Status>
+            ))}
+            {w.theoryTaskIds.map((id) => (
+              <Status key={id}>question</Status>
             ))}
             {w.describedTaskIds.map((id) => (
               <Status key={id}>described</Status>

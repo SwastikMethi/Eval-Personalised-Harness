@@ -1,10 +1,16 @@
 UV := uv --directory backend
 
-.PHONY: setup dev backend frontend test test-backend test-frontend lint typecheck migrate seed demo clean-sandboxes
+.PHONY: setup sandbox-image dev backend frontend test test-backend test-frontend lint typecheck migrate seed demo clean-sandboxes
 
 setup:
 	cd backend && uv sync
 	cd frontend && npm install
+
+# The image every sandboxed run and every baseline starts from. Rebuild after
+# editing sandbox-images/python/Dockerfile — nothing does it automatically, and
+# a stale image shows up as "command not found" inside a container.
+sandbox-image:
+	docker build -t aso-sandbox-python:dev sandbox-images/python
 
 dev:
 	$(MAKE) -j2 backend frontend

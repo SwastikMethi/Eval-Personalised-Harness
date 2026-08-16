@@ -13,6 +13,21 @@ import { OPTIONAL_COMMANDS, type Wizard } from './useWizard'
 export default function SetupPanel({ w }: { w: Wizard }) {
   const { strategy, suggestion, baseline } = w
 
+  // Every selected task is graded by rubric, so there is nothing for a test
+  // command or a baseline to contribute. Saying so is better than leaving a
+  // panel that reads "baseline not run" as though something were missing.
+  if (w.theoryOnly) {
+    return (
+      <Panel label="Setup">
+        <p style={{ ...type.bodySm, color: color.dim, maxWidth: measure }}>
+          Comprehension tasks are graded against a rubric written from this repository — no test
+          suite, no patch and no dependency install. Nothing needs to be configured here, and no
+          baseline is run.
+        </p>
+      </Panel>
+    )
+  }
+
   return (
     <Panel>
       <button
@@ -263,16 +278,21 @@ export default function SetupPanel({ w }: { w: Wizard }) {
               </Notice>
             )}
 
-            {/* The actual failure output. "exit 2" alone is undiagnosable. */}
+            {/* The actual failure output. "exit 2" alone is undiagnosable —
+                and when the cause is a tool the sandbox lacks, the backend
+                names it, because a raw Docker build log does not. */}
             {baseline &&
               Object.entries(baseline.steps)
-                .filter(([, s]) => s.exit_code !== 0 && s.output)
+                .filter(([, s]) => s.exit_code !== 0 && (s.output || s.diagnosis))
                 .map(([name, s]) => (
                   <div key={name} style={{ marginBottom: space[3] }}>
                     <Label>{name} output</Label>
-                    <div style={{ marginTop: space[2] }}>
-                      <Output>{s.output}</Output>
-                    </div>
+                    {s.diagnosis && <Notice tone="warn">{s.diagnosis}</Notice>}
+                    {s.output && (
+                      <div style={{ marginTop: space[2] }}>
+                        <Output>{s.output}</Output>
+                      </div>
+                    )}
                   </div>
                 ))}
 

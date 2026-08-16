@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../api'
 import type { Analysis, Commit, HiddenTest, ProposedTask } from '../../api'
@@ -55,6 +55,10 @@ export function useWizard() {
   const [proposed, setProposed] = useState<ProposedTask[]>([])
   const [shaToTask, setShaToTask] = useState<Record<string, string>>({})
   const [selectedShas, setSelectedShas] = useState<string[]>([])
+  // Two lists, not one. They used to share `describedTaskIds`, which made
+  // "are all the selected tasks comprehension tasks?" unanswerable — and that
+  // is exactly the question that decides whether a baseline is needed at all.
+  const [theoryTaskIds, setTheoryTaskIds] = useState<string[]>([])
   const [describedTaskIds, setDescribedTaskIds] = useState<string[]>([])
   const [title, setTitle] = useState('')
   const [prompt, setPrompt] = useState('')
@@ -129,7 +133,10 @@ export function useWizard() {
       setFramework(detail.commands?.test_framework ?? '')
       setError(null)
       setStep(1)
-      runBaseline.mutate(id)
+      // No baseline here. It used to fire on registration, before the task type
+      // was known, so a comprehension-only run paid for a container — and on a
+      // repo whose install does not work in the sandbox, paid for it failing.
+      // `ensureBaseline` starts it the moment a task is picked that needs one.
     },
     onError: fail,
   })
@@ -146,6 +153,17 @@ export function useWizard() {
     onError: fail,
   })
 
+  /**
+   * Start the baseline, once, for task kinds that are graded by running tests.
+   *
+   * Commit and user-defined tasks need it: pre-existing failures must not be
+   * counted as agent regressions. Comprehension tasks never call this.
+   */
+  const ensureBaseline = useCallback(() => {
+    if (!repoId || runBaseline.isPending || runBaseline.data) return
+    runBaseline.mutate(repoId)
+  }, [repoId, runBaseline])
+
   /** Tick a commit → create its task once and cache it, so re-ticking is free
    *  and hidden-test candidates load immediately. */
   const pickCommit = useMutation({
@@ -157,6 +175,8 @@ export function useWizard() {
     onSuccess: async ({ sha, id, candidates }) => {
       setShaToTask((prev) => ({ ...prev, [sha]: id }))
       setSelectedShas((prev) => (prev.includes(sha) ? prev : [...prev, sha]))
+      // This task is graded by running the suite, so the baseline is needed.
+      ensureBaseline()
       setError(null)
       if (candidates > 0) {
         const candidateList = await api.hiddenTests(id)
@@ -231,6 +251,7 @@ export function useWizard() {
     mutationFn: () => api.createTask({ repository_id: repoId!, title, prompt }),
     onSuccess: ({ id }) => {
       setDescribedTaskIds((prev) => [...prev, id])
+      ensureBaseline()
       setTitle('')
       setPrompt('')
       setError(null)
@@ -239,9 +260,23 @@ export function useWizard() {
   })
 
   const taskIds = useMemo(
-    () => [...selectedShas.map((s) => shaToTask[s]).filter(Boolean), ...describedTaskIds],
-    [selectedShas, shaToTask, describedTaskIds],
+    () => [
+      ...selectedShas.map((s) => shaToTask[s]).filter(Boolean),
+      ...theoryTaskIds,
+      ...describedTaskIds,
+    ],
+    [selectedShas, shaToTask, theoryTaskIds, describedTaskIds],
   )
+
+  /**
+   * Every selected task is a comprehension task.
+   *
+   * Those are graded against a rubric by reading the repository — no test
+   * suite, no patch, no dependency install. A baseline would prove nothing and
+   * can fail for reasons that have no bearing on the result.
+   */
+  const theoryOnly =
+    taskIds.length > 0 && selectedShas.length === 0 && describedTaskIds.length === 0
 
   /** Ask for the shortlist as soon as the user reaches the task step. One
    *  request, reused by the setup panel on the next step — the model reads the
@@ -327,7 +362,7 @@ export function useWizard() {
   const testCommand = (commands.test ?? '').trim()
   const baseline = runBaseline.data
   const baselineBroken = baseline?.benchmarkable === false
-  const needsAttention = Boolean(repoId) && (!testCommand || baselineBroken)
+  const needsAttention = Boolean(repoId) && !theoryOnly && (!testCommand || baselineBroken)
 
   // Open the setup panel by itself, but only when something genuinely needs
   // the user — otherwise it stays out of the way.
@@ -343,8 +378,10 @@ export function useWizard() {
   if (taskIds.length === 0) blockers.push('pick at least one task')
   if (harnesses.length === 0) blockers.push('pick at least one harness')
   if (models.length === 0) blockers.push('pick at least one model')
-  if (!testCommand) blockers.push('no test command — there is no correctness signal without one')
-  if (baselineBroken) blockers.push('baseline could not establish a signal')
+  // Neither applies to a comprehension-only matrix: the rubric is the signal.
+  if (!theoryOnly && !testCommand)
+    blockers.push('no test command — there is no correctness signal without one')
+  if (!theoryOnly && baselineBroken) blockers.push('baseline could not establish a signal')
 
   // Backend already sorts free + tool-capable first; this only narrows.
   const sortedModels = useMemo(() => {
@@ -389,6 +426,8 @@ export function useWizard() {
     proposed,
     selectedShas,
     setSelectedShas,
+    theoryTaskIds,
+    setTheoryTaskIds,
     describedTaskIds,
     setDescribedTaskIds,
     title,
@@ -448,6 +487,8 @@ export function useWizard() {
     baseline,
     baselineBroken,
     needsAttention,
+    theoryOnly,
+    ensureBaseline,
     runs,
     requests,
     overDailyCap,

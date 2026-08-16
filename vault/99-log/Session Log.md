@@ -375,4 +375,28 @@ Two things already worked and are worth recording so nobody re-derives them: `mi
 
 ---
 
+## 2026-08-17 — Per-repo environments, and comprehension without a baseline
+
+`Eval-Personalised-Harness` failed its baseline with `make: not found`. The missing `make` was real but it was **the least of three stacked defects**, and fixing it alone would not have helped. The build log gave the rest away: `transferring context: 138B` — the generated Dockerfile and nothing else.
+
+1. `make` and `uv` were absent from the sandbox image.
+2. `Makefile` was not a recognised manifest, so it was never copied in.
+3. Manifests were discovered **root-only** and copied **flattened to their basename**. A repo keeping `backend/pyproject.toml` contributed nothing, and `cd backend && uv sync` could never have found its file. `detectors.py` has the same root-only blind spot.
+
+**`sandboxes/environment.py`** now resolves an `EnvironmentSpec` — system packages from a fixed allowlist, plus the files to copy — searching one directory deep and preserving paths. A repo Dockerfile is read for its `apt-get install` lines as *evidence*; it is never built, because its `FROM` would discard the harnesses. The allowlist is enforced on the result rather than requested in a prompt, following `repositories/repair.py`: system packages decide what the benchmark can compile, so the set has to be auditable.
+
+**The find that mattered more than the original bug.** Containers bind-mount the host workspace over `/workspace`, so an image that populated `.venv` or `node_modules` in there has its work erased the instant the container starts. `pip install` reaches site-packages and survives; `uv sync` and `npm install` do not. The prepared-image cache was therefore spending minutes producing layers the mount discarded — a full `make setup` build measured **over ten minutes** before being thrown away. Those installs now skip the image entirely and run in-container, where the test step can see them.
+
+**A failed install no longer ends the baseline.** It names the missing tool (`missing_tool`, exit 127 / "not found"), records a warning, and lets the test step decide. Reporting `make: not found` — a gap in *our* image — as "this repository cannot be scored" threw away stdlib-only repos that pass their suite with no install at all. A dead suite still yields no signal, so this degrades without papering over.
+
+**Comprehension tasks never trigger a baseline.** `queue._prepared_image` returns `None` for `kind == "theory"`: the agent reads code, it never installs or runs a suite. On the frontend the baseline used to fire on *registration*, before the task type was known; it now waits until a commit or user-defined task is picked. `describedTaskIds` was split into `theoryTaskIds` and `describedTaskIds` — the single list held both, which made "are all selections theory?" unanswerable.
+
+**Image:** `make`, `build-essential` and `uv` join the base, with a `make sandbox-image` target because none existed. Verified in the rebuilt image: GNU Make 4.4.1, uv 0.5.11, gcc 14.2.0, Node 20.20.2.
+
+**Verify:** ruff ✅ · mypy ✅ · **379 backend passed** (was 375) · frontend **41 passed**, build + tsc + oxlint green. End to end: the per-repo image for the failing repo now builds with `Makefile` at `/workspace/Makefile`, `backend/uv.lock` at its real path, and `make setup` genuinely running — `.venv` and `node_modules` both present.
+
+**One existing test changed intent deliberately**: `test_prebuilt_install_failure_blocks_and_keeps_its_log` became `..._warns_and_keeps_its_log`. Keeping the log and attributing it to install still holds; halting does not.
+
+---
+
 <!-- New entries above this line -->

@@ -3,6 +3,7 @@ snapshot BEFORE any agent touches the repo, storing per-case test identity so
 pre-existing failures are never counted as agent regressions (Stage 5).
 """
 
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,35 @@ _RUNNER_INSTALL = runner_repair.RUNNER_INSTALL
 _looks_like_missing_runner = runner_repair.looks_like_missing_runner
 
 
+# zsh-style, and unambiguous, so it is tried first: "sh: command not found: poetry".
+_MISSING_SUFFIX = re.compile(r"command not found:\s*([\w.+-]+)", re.MULTILINE)
+# sh/bash style: "/bin/sh: 1: make: not found", "bash: uv: command not found".
+_MISSING_PREFIX = re.compile(r"([\w./+-]+):\s*(?:command\s+)?not found", re.MULTILINE)
+
+# The shell reporting the failure is not the tool that is missing.
+_SHELLS = frozenset({"sh", "bash", "dash", "zsh", "env"})
+
+
+def missing_tool(result: CommandResult) -> str | None:
+    """The executable a command could not find, if that is why it failed.
+
+    Exit 127 is the shell's "command not found", and the raw Docker build log
+    around it is unreadable. Naming the tool turns an opaque wall of build
+    output into one actionable sentence.
+    """
+    text = f"{result.stdout}\n{result.stderr}"
+
+    if match := _MISSING_SUFFIX.search(text):
+        return match.group(1)
+
+    for match in _MISSING_PREFIX.finditer(text):
+        # `/bin/sh: 1: make` — keep the executable, drop any path prefix.
+        name = match.group(1).rsplit("/", 1)[-1]
+        if name and name not in _SHELLS:
+            return name
+    return None
+
+
 def _record(result: CommandResult) -> dict[str, Any]:
     data = asdict(result)
     data["stdout"] = data["stdout"][-20000:]
@@ -61,8 +91,20 @@ def run_baseline(
     if prebuilt_install is not None:
         outcome.steps["install"] = _record(prebuilt_install)
         if prebuilt_install.exit_code != 0:
-            outcome.benchmarkable = False
-            return outcome
+            # A failed install used to end the baseline here, which reported
+            # "unbenchmarkable" for a repo whose tests may well run — a
+            # stdlib-only or vendored project needs no install at all. Say what
+            # broke, then let the test step decide whether there is a signal.
+            missing = missing_tool(prebuilt_install)
+            outcome.steps["install"]["diagnosis"] = (
+                f"`{missing}` is not available in the sandbox image, so dependencies "
+                f"were not installed. Add it to sandbox-images/python/Dockerfile and "
+                f"run `make sandbox-image`, or set an install command that does not "
+                f"need it."
+                if missing
+                else "Installing dependencies failed; continuing without them."
+            )
+            outcome.warn = True
 
     for step in ("install", "build"):
         cmd = commands.get(step)
