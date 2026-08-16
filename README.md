@@ -23,7 +23,7 @@ Requirements: [uv](https://docs.astral.sh/uv/), Node 20+, Docker (Stage 4+), mac
 ```sh
 make setup        # backend deps (uv sync) + frontend deps (npm install)
 cp .env.example .env   # add your OPENROUTER_API_KEY (Stage 3+)
-make dev          # backend :8000 (native host process) + frontend :3000
+make dev          # backend :8005 (native host process) + frontend :3000
 make test         # backend pytest + frontend tests
 make demo         # end-to-end fake experiment, zero API cost
 ```

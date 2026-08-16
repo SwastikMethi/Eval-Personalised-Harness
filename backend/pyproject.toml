@@ -39,3 +39,9 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Tests that create real containers. They churn Docker hard enough to break a
+# benchmark run executing at the same time — a live 8-run batch collapsed with
+# SIGKILLed containers and vanished networks when the suite ran beside it. Run
+# `pytest -m "not docker"` while a run is in flight; excluding files by hand is
+# how the wrong set got excluded in the first place.
+markers = ["docker: creates real Docker containers"]

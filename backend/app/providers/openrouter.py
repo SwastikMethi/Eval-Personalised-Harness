@@ -1,9 +1,10 @@
 """OpenRouter provider (spec §4).
 
 Rules enforced here: never `openrouter/free` (it routes to arbitrary models);
-free variants identified by pricing metadata AND `:free` suffix; returned
-routing metadata recorded for reproducibility; usage estimated (and flagged)
-only when the provider omits it.
+never a moving alias (`~vendor/model` or `vendor/model-latest`) for the same
+reason; free variants identified by pricing metadata AND `:free` suffix;
+returned routing metadata recorded for reproducibility; usage estimated (and
+flagged) only when the provider omits it.
 """
 
 import json
@@ -12,8 +13,15 @@ from typing import Any
 
 import httpx
 
+from app.core.config import settings
 from app.core.errors import ErrorCategory
-from app.providers.base import CompletionResult, CompletionUsage, ModelInfo, ModelProvider
+from app.providers.base import (
+    CompletionResult,
+    CompletionUsage,
+    ModelInfo,
+    ModelProvider,
+    is_moving_alias,
+)
 
 
 class ProviderError(Exception):
@@ -85,7 +93,9 @@ class OpenRouterProvider(ModelProvider):
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
-            transport=self._transport, headers=self._headers, timeout=120
+            transport=self._transport,
+            headers=self._headers,
+            timeout=settings.provider_timeout_seconds,
         )
 
     @staticmethod
@@ -107,6 +117,7 @@ class OpenRouterProvider(ModelProvider):
             output_price_per_token=out_price,
             is_free=(in_price == 0 and out_price == 0) and model_id.endswith(":free"),
             availability_status="available",
+            is_alias=is_moving_alias(model_id),
         )
 
     async def list_models(self) -> list[ModelInfo]:
@@ -126,6 +137,13 @@ class OpenRouterProvider(ModelProvider):
         if model_id == "openrouter/free":
             raise ProviderError(
                 "openrouter/free routes to arbitrary models and is banned for experiments",
+                ErrorCategory.MODEL_PROVIDER,
+                retryable=False,
+            )
+        if is_moving_alias(model_id):
+            raise ProviderError(
+                f"{model_id} is a moving alias — it follows the vendor's current release, so a "
+                "rerun could measure a different model. Pin the exact versioned id instead.",
                 ErrorCategory.MODEL_PROVIDER,
                 retryable=False,
             )
@@ -149,7 +167,9 @@ class OpenRouterProvider(ModelProvider):
         self, model_id: str, messages: list[dict[str, Any]], **kwargs: Any
     ) -> CompletionResult:
         payload: dict[str, Any] = {"model": model_id, "messages": messages}
-        for key in ("temperature", "max_tokens"):
+        # tools/tool_choice must reach the provider or function-calling
+        # harnesses silently degrade into plain chat.
+        for key in ("temperature", "max_tokens", "tools", "tool_choice", "response_format"):
             if kwargs.get(key) is not None:
                 payload[key] = kwargs[key]
         try:
@@ -163,11 +183,15 @@ class OpenRouterProvider(ModelProvider):
             raise normalize_http_error(resp.status_code, resp.text)
         try:
             body = resp.json()
-            content = body["choices"][0]["message"]["content"]
+            choice = body["choices"][0]
+            message = choice["message"]
         except (json.JSONDecodeError, KeyError, IndexError) as exc:
             raise ProviderError(
                 "invalid completion response", ErrorCategory.MODEL_PROVIDER, retryable=True
             ) from exc
+        # A tool-calling reply legitimately has content=None; treating that as
+        # a malformed response would break every function-calling harness.
+        content = message.get("content") or ""
         usage_raw = body.get("usage") or {}
         if usage_raw.get("prompt_tokens") is not None:
             usage = CompletionUsage(
@@ -183,6 +207,8 @@ class OpenRouterProvider(ModelProvider):
         return CompletionResult(
             content=content,
             usage=usage,
+            message=message,
+            finish_reason=choice.get("finish_reason"),
             raw={
                 # Reproducibility: which upstream actually served this request.
                 "routed_model": body.get("model"),

@@ -22,6 +22,12 @@ DEFAULT_WEIGHTS = {
 
 MIN_REPS_FOR_CONFIDENCE = 3
 
+# How close two combinations must be before naming one of them a winner is
+# false precision. Sized against the judged path, which is the noisy one: a
+# seven-criterion rubric moves in steps of ~0.14, so this catches identical
+# scores and genuine sampling jitter without swallowing a real one-criterion gap.
+TIE_EPSILON = 0.02
+
 
 @dataclass
 class RunSample:
@@ -217,10 +223,43 @@ def recommend(all_stats: list[CombinationStats]) -> dict[str, Any]:
         return {"recommendations": {}, "note": "no eligible combinations"}
 
     def _best(metric: str) -> dict[str, Any]:
-        key = max(combos, key=lambda k: combos[k][metric])
-        entry = dict(combos[key])
-        entry["why"] = f"highest {metric} among eligible combinations"
-        return entry
+        """The leader on this metric, or an explicit tie.
+
+        This was `max()` with an unconditional "highest {metric}" label, so a
+        matrix where every combination scored 0.0 still crowned one of them —
+        which is exactly what "do not produce a winner from weak evaluation
+        signal" (CLAUDE.md §4) forbids. Two combinations at zero are not a
+        ranking; they are two combinations that failed the same way.
+
+        The epsilon exists because judged scores are noisy by construction:
+        gpt-5.x cannot be pinned to temperature 0, so a hair of difference
+        between two runs is sampling, not quality.
+        """
+        ranked = sorted(combos.items(), key=lambda kv: kv[1][metric], reverse=True)
+        top = ranked[0][1][metric]
+        entry = dict(ranked[0][1])
+
+        if top <= 0.0:
+            return entry | {
+                "tied": True,
+                "why": f"no combination scored above zero on {metric} — nothing to rank",
+            }
+
+        contenders = [k for k, v in ranked if abs(v[metric] - top) <= TIE_EPSILON]
+        if len(contenders) > 1:
+            names = ", ".join(f"{combos[k]['harness']}/{combos[k]['model_id']}" for k in contenders)
+            return entry | {
+                "tied": True,
+                "why": (
+                    f"{len(contenders)} combinations within {TIE_EPSILON:g} on {metric} "
+                    f"({names}) — too close to separate"
+                ),
+            }
+
+        return entry | {
+            "tied": False,
+            "why": f"highest {metric} among eligible combinations",
+        }
 
     return {
         "recommendations": {

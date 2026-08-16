@@ -1,0 +1,1378 @@
+import { useMutation, useQuery } from '@tanstack/react-query'
+import {
+  Alert,
+  Box,
+  Button,
+  Checkbox,
+  Chip,
+  CircularProgress,
+  Collapse,
+  Divider,
+  FormControlLabel,
+  Grid,
+  Radio,
+  RadioGroup,
+  Step,
+  StepLabel,
+  Stepper,
+  Table,
+  TableBody,
+  TableCell,
+  TableRow,
+  TextField,
+  ToggleButton,
+  ToggleButtonGroup,
+  Typography,
+} from '@mui/material'
+import { useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { api } from '../api'
+import type { Analysis, Commit, HiddenTest, ProposedTask } from '../api'
+import { Empty, Mono, PageTitle, Panel, Stat } from '../components/primitives'
+import { C, fonts } from '../theme'
+
+const STEPS = ['Repository', 'Task', 'Configure & review'] as const
+
+/** Only `test` is load-bearing. The backend skips a blank install/build/lint/
+ *  typecheck outright, so presenting them as equal fields implies work the
+ *  user does not need to do — most Python repos have no build step at all. */
+const REQUIRED_COMMANDS = ['test'] as const
+const OPTIONAL_COMMANDS = ['install', 'build', 'lint', 'typecheck'] as const
+
+/** Free tier grants roughly 50 model requests a DAY, so the request budget —
+ *  not wall-clock — decides whether a matrix is runnable today. */
+const DAILY_FREE_REQUESTS = 50
+
+export default function NewRun() {
+  const navigate = useNavigate()
+  const [step, setStep] = useState(0)
+  const [error, setError] = useState<string | null>(null)
+
+  // step 1
+  const [source, setSource] = useState<'local' | 'github'>('local')
+  const [pathOrUrl, setPathOrUrl] = useState('')
+  const [repoId, setRepoId] = useState<string | null>(null)
+  const [analysis, setAnalysis] = useState<Analysis | null>(null)
+  const [commands, setCommands] = useState<Record<string, string>>({})
+  const [framework, setFramework] = useState('')
+  const [baselineStale, setBaselineStale] = useState(false)
+
+  // step 2
+  // Comprehension tasks need no test suite, no patch and no environment
+  // repair — which is why they are the mode that works on a repo whose own
+  // tests cannot distinguish a correct patch from an empty one.
+  const [taskMode, setTaskMode] = useState<'commit' | 'comprehension' | 'describe'>('commit')
+  const [proposed, setProposed] = useState<ProposedTask[]>([])
+  const [shaToTask, setShaToTask] = useState<Record<string, string>>({})
+  const [selectedShas, setSelectedShas] = useState<string[]>([])
+  const [describedTaskIds, setDescribedTaskIds] = useState<string[]>([])
+  const [title, setTitle] = useState('')
+  const [prompt, setPrompt] = useState('')
+  const [hidden, setHidden] = useState<HiddenTest[]>([])
+  // Of 11 commits on a typical small repo, 5 are README edits and 2 are merges.
+  // The model's shortlist is the default; the raw log stays one click away so a
+  // bad nomination never traps the user.
+  const [showAllCommits, setShowAllCommits] = useState(false)
+
+  // step 3
+  const [harnesses, setHarnesses] = useState<string[]>([])
+  const [models, setModels] = useState<string[]>([])
+  const [reps, setReps] = useState(1)
+  // Two knobs, not one. They used to be the same number sent as both
+  // max_model_requests and max_steps, which meant you could not bound spend
+  // without also bounding how much work the agent was allowed to attempt.
+  const [budget, setBudget] = useState(8)
+  const [steps, setSteps] = useState(50)
+  // Uncapped lets the agent stop when it is finished rather than when it runs
+  // out of allowance. Safe because a run that times out having produced a patch
+  // is still graded — but only sensible where tokens, not a daily request
+  // quota, are the constraint, so it stays off for free-tier providers.
+  const [uncapped, setUncapped] = useState(false)
+  const [setupOpen, setSetupOpen] = useState(false)
+  // Free-only by default: of 400+ models on OpenRouter only ~14 are free, and
+  // this account has no credits, so listing the rest is 400 ways to fail.
+  const [showPaid, setShowPaid] = useState(false)
+  const [modelFilter, setModelFilter] = useState('')
+  const [provider, setProvider] = useState('openrouter')
+
+  const availableHarnesses = useQuery({ queryKey: ['harnesses'], queryFn: api.harnesses })
+  const providers = useQuery({ queryKey: ['providers'], queryFn: api.providers })
+  const activeProvider = providers.data?.find((p) => p.name === provider)
+  // NIM bills credits — nothing there is a free per-token tier, so a
+  // "free only" filter would return an empty list.
+  const freeOnly = activeProvider?.has_free_tier === false ? false : !showPaid
+  const availableModels = useQuery({
+    queryKey: ['models', provider, freeOnly],
+    queryFn: () => api.models(provider, freeOnly),
+    staleTime: 300_000,
+  })
+  const commits = useQuery({
+    queryKey: ['commits', repoId],
+    queryFn: () => api.commits(repoId!),
+    enabled: Boolean(repoId),
+  })
+
+  const fail = (e: unknown) => setError(e instanceof Error ? e.message : String(e))
+
+  // Runs in the background while the user picks tasks — install + the test
+  // suite is slow, and blocking a whole wizard step on it buys nothing.
+  const runBaseline = useMutation({
+    mutationFn: (id: string) => api.baseline(id),
+    onSuccess: () => setBaselineStale(false),
+  })
+
+  const addRepo = useMutation({
+    mutationFn: async () => {
+      const name = pathOrUrl.replace(/\/+$/, '').split('/').pop() || 'repository'
+      const { id } = await api.addRepository({ name, source, path_or_url: pathOrUrl })
+      await api.analyze(id)
+      return { id, detail: await api.analysis(id) }
+    },
+    onSuccess: ({ id, detail }) => {
+      setRepoId(id)
+      setAnalysis(detail)
+      const next: Record<string, string> = {}
+      for (const f of [...REQUIRED_COMMANDS, ...OPTIONAL_COMMANDS]) {
+        next[f] = detail.commands?.[f] ?? ''
+      }
+      setCommands(next)
+      setFramework(detail.commands?.test_framework ?? '')
+      setError(null)
+      setStep(1)
+      runBaseline.mutate(id)
+    },
+    onError: fail,
+  })
+
+  const saveCommands = useMutation({
+    mutationFn: async () => {
+      const payload: Record<string, string | null> = { test_framework: framework || null }
+      for (const f of [...REQUIRED_COMMANDS, ...OPTIONAL_COMMANDS]) {
+        payload[f] = commands[f]?.trim() || null
+      }
+      await api.updateCommands(repoId!, payload)
+    },
+    onSuccess: () => setBaselineStale(true),
+    onError: fail,
+  })
+
+  /** Tick a commit → create its task once and cache it, so re-ticking is free
+   *  and hidden-test candidates load immediately. */
+  const pickCommit = useMutation({
+    mutationFn: async (sha: string) => {
+      if (shaToTask[sha]) return { sha, id: shaToTask[sha], candidates: 0 }
+      const res = await api.taskFromCommit({ repository_id: repoId!, sha })
+      return { sha, id: res.id, candidates: res.hidden_test_candidates }
+    },
+    onSuccess: async ({ sha, id, candidates }) => {
+      setShaToTask((prev) => ({ ...prev, [sha]: id }))
+      setSelectedShas((prev) => (prev.includes(sha) ? prev : [...prev, sha]))
+      setError(null)
+      if (candidates > 0) {
+        const candidateList = await api.hiddenTests(id)
+        setHidden((prev) => [...prev, ...candidateList])
+      }
+    },
+    onError: fail,
+  })
+
+  /** One request per press. Fills the fields as editable suggestions — never
+   *  saved, never applied silently; the baseline then verifies them. */
+  const askAi = useMutation({
+    mutationFn: () => api.suggest(repoId!),
+    onSuccess: (s) => {
+      const next = { ...commands }
+      for (const f of [...REQUIRED_COMMANDS, ...OPTIONAL_COMMANDS]) {
+        next[f] = s.commands[f] ?? ''
+      }
+      setCommands(next)
+      if (s.commands.test_framework) setFramework(s.commands.test_framework)
+      setSetupOpen(true)
+      setBaselineStale(true)
+      setError(null)
+    },
+    onError: fail,
+  })
+  const suggestion = askAi.data
+
+  /** Decides HOW this repo can be evaluated and proves it by executing a
+   *  baseline. Slower than "Suggest with AI" because it actually runs the
+   *  commands — which is the point: it answers "can this repo be scored at
+   *  all" BEFORE a matrix spends credits, rather than after every run comes
+   *  back INSUFFICIENT_EVALUATION_SIGNAL. */
+  const decideStrategy = useMutation({
+    mutationFn: () => api.evaluationStrategy(repoId!),
+    onSuccess: (d) => {
+      const next = { ...commands }
+      for (const f of [...REQUIRED_COMMANDS, ...OPTIONAL_COMMANDS]) {
+        if (d.commands[f] !== undefined) next[f] = d.commands[f] ?? ''
+      }
+      setCommands(next)
+      if (d.commands.test_framework) setFramework(d.commands.test_framework)
+      setSetupOpen(true)
+      // The analyzer already ran the baseline, so the commands are verified —
+      // but leave the user free to re-run it after any edit of their own.
+      setBaselineStale(false)
+      setError(null)
+    },
+    onError: fail,
+  })
+  const strategy = decideStrategy.data
+
+  /** Ask the analyzer for comprehension questions and the rubric each will be
+   *  graded against. The tasks are created server-side so they tick like
+   *  commits; the rubric is shown before launch so a low score can be checked
+   *  against what was actually asked for. */
+  const proposeTasks = useMutation({
+    mutationFn: () => api.proposeTasks(repoId!),
+    onSuccess: ({ tasks }) => {
+      setProposed(tasks)
+      setError(null)
+    },
+    onError: fail,
+  })
+
+  const describeTask = useMutation({
+    mutationFn: () => api.createTask({ repository_id: repoId!, title, prompt }),
+    onSuccess: ({ id }) => {
+      setDescribedTaskIds((prev) => [...prev, id])
+      setTitle('')
+      setPrompt('')
+      setError(null)
+    },
+    onError: fail,
+  })
+
+  const taskIds = useMemo(
+    () => [...selectedShas.map((s) => shaToTask[s]).filter(Boolean), ...describedTaskIds],
+    [selectedShas, shaToTask, describedTaskIds],
+  )
+
+  /** Ask for the shortlist as soon as the user reaches the task step. One
+   *  request, reused by the setup panel on the next step — the model reads the
+   *  repository once, not once per thing we want from it. */
+  useEffect(() => {
+    if (step === 1 && repoId && !askAi.data && !askAi.isPending) askAi.mutate()
+  }, [step, repoId, askAi])
+
+  /** The shortlist, restored to full commit metadata. Nominations carry the
+   *  sha, subject, parent and the model's reason; author and date come from
+   *  the git log we already fetched. */
+  const nominated = useMemo(() => {
+    const byS = new Map((commits.data ?? []).map((c: Commit) => [c.sha, c]))
+    return (suggestion?.commits ?? [])
+      .map((n) => ({ ...byS.get(n.sha), ...n }))
+      .filter((c) => c.parent)
+  }, [suggestion, commits.data])
+
+  const usingShortlist = !showAllCommits && nominated.length > 0
+  const commitList = usingShortlist
+    ? nominated
+    : (commits.data ?? []).filter((c: Commit) => c.parent).slice(0, 50)
+
+  /** The slow step, run once per selected commit: rewrite the prompt, and
+   *  generate a hidden test when the commit shipped none — each proven to fail
+   *  before the fix and pass after it before it is offered for approval. */
+  const prepare = useMutation({
+    mutationFn: async () => {
+      await api.prepareTests(repoId!)
+      const reports = []
+      for (const sha of selectedShas) {
+        const taskId = shaToTask[sha]
+        if (taskId) reports.push(await api.prepareTask(taskId, sha))
+      }
+      const lists = await Promise.all(
+        selectedShas.map((s) => shaToTask[s]).filter(Boolean).map(api.hiddenTests),
+      )
+      return { reports, candidates: lists.flat() }
+    },
+    onSuccess: ({ candidates }) => {
+      setHidden(candidates)
+      setError(null)
+    },
+    onError: fail,
+  })
+
+  const launch = useMutation({
+    mutationFn: async () => {
+      // Pin exact model metadata per experiment so a model that later vanishes
+      // fails its combination loudly instead of being silently substituted.
+      for (const m of models) {
+        try {
+          await api.snapshotModel(provider, m)
+        } catch {
+          /* snapshot is best-effort; pricing just stays unknown */
+        }
+      }
+      const combinations = harnesses.flatMap((h) =>
+        models.map((m) => ({ harness: h, provider, model_id: m })),
+      )
+      return api.createExperiment({
+        repository_id: repoId,
+        name: `${harnesses.length}×${models.length} · ${new Date().toISOString().slice(0, 16)}`,
+        task_ids: taskIds,
+        combinations,
+        repetitions: reps,
+        config: {
+          // null is the wire form of "uncapped" — the backend only applies its
+          // default when the key is absent, so this must be sent explicitly.
+          max_model_requests: uncapped ? null : budget,
+          max_steps: steps,
+          timeout_seconds: 1800,
+        },
+      })
+    },
+    onSuccess: ({ id }) => navigate(`/experiments/${id}`),
+    onError: fail,
+  })
+
+  const testCommand = (commands.test ?? '').trim()
+  const baseline = runBaseline.data
+  const baselineBroken = baseline?.benchmarkable === false
+  const needsAttention = Boolean(repoId) && (!testCommand || baselineBroken)
+
+  // Open the setup panel by itself, but only when something genuinely needs
+  // the user — otherwise it stays out of the way.
+  useEffect(() => {
+    if (needsAttention) setSetupOpen(true)
+  }, [needsAttention])
+
+  const runs = harnesses.length * models.length * taskIds.length * reps
+  const requests = runs * budget
+  const overDailyCap = requests > DAILY_FREE_REQUESTS
+
+  const blockers: string[] = []
+  if (taskIds.length === 0) blockers.push('pick at least one task')
+  if (harnesses.length === 0) blockers.push('pick at least one harness')
+  if (models.length === 0) blockers.push('pick at least one model')
+  if (!testCommand) blockers.push('no test command — there is no correctness signal without one')
+  if (baselineBroken) blockers.push('baseline could not establish a signal')
+
+  const toggle = (list: string[], value: string, set: (v: string[]) => void) =>
+    set(list.includes(value) ? list.filter((v) => v !== value) : [...list, value])
+
+  // Backend already sorts free + tool-capable first; this only narrows.
+  const sortedModels = useMemo(() => {
+    const q = modelFilter.trim().toLowerCase()
+    const all = availableModels.data ?? []
+    return q ? all.filter((m) => m.model_id.toLowerCase().includes(q)) : all
+  }, [availableModels.data, modelFilter])
+
+  const baselineLabel = runBaseline.isPending
+    ? 'baseline running…'
+    : baselineBroken
+      ? 'baseline failed'
+      : baseline?.warn
+        ? 'baseline passed with warnings'
+        : baseline
+          ? 'baseline passed'
+          : 'baseline not run'
+
+  return (
+    <Box>
+      <PageTitle
+        title="New benchmark run"
+        sub="Point it at a repository, pick what the agents should attempt, then choose which harness × model combinations to compare."
+      />
+
+      <Stepper activeStep={step} sx={{ mb: 4 }}>
+        {STEPS.map((label, i) => (
+          <Step key={label} completed={i < step}>
+            <StepLabel
+              onClick={() => i < step && setStep(i)}
+              sx={{
+                cursor: i < step ? 'pointer' : 'default',
+                '& .MuiStepLabel-label': { fontSize: '0.82rem', fontWeight: 600 },
+              }}
+            >
+              {label}
+            </StepLabel>
+          </Step>
+        ))}
+      </Stepper>
+
+      {error && (
+        <Alert severity="error" sx={{ mb: 3 }} onClose={() => setError(null)}>
+          {error}
+        </Alert>
+      )}
+
+      {/* ---------------------------------------------------------------- 1 */}
+      {step === 0 && (
+        <Panel label="Repository">
+          <RadioGroup
+            row
+            value={source}
+            onChange={(e) => setSource(e.target.value as 'local' | 'github')}
+            sx={{ mb: 2 }}
+          >
+            <FormControlLabel value="local" control={<Radio size="small" />} label="Local path" />
+            <FormControlLabel
+              value="github"
+              control={<Radio size="small" />}
+              label="Public GitHub URL"
+            />
+          </RadioGroup>
+          <TextField
+            fullWidth
+            value={pathOrUrl}
+            onChange={(e) => setPathOrUrl(e.target.value)}
+            placeholder={
+              source === 'local' ? '/Users/you/Projects/your-repo' : 'https://github.com/owner/repo'
+            }
+            sx={{ mb: 1 }}
+          />
+          <Typography sx={{ color: C.faint, fontSize: '0.78rem', mb: 2, maxWidth: '72ch' }}>
+            That is all that is needed to start. Languages, package managers and test commands are
+            detected automatically, and a clean baseline runs in the background while you pick
+            tasks — you can review and correct all of it on the last step.
+          </Typography>
+          <Button
+            variant="contained"
+            disabled={!pathOrUrl.trim() || addRepo.isPending}
+            onClick={() => addRepo.mutate()}
+            startIcon={addRepo.isPending ? <CircularProgress size={14} /> : null}
+          >
+            {addRepo.isPending ? 'Analyzing…' : 'Analyze repository'}
+          </Button>
+        </Panel>
+      )}
+
+      {/* ---------------------------------------------------------------- 2 */}
+      {step === 1 && (
+        <Grid container spacing={2}>
+          <Grid size={{ xs: 12, md: 7 }}>
+            <Panel label="What should the agents attempt?">
+              <ToggleButtonGroup
+                exclusive
+                size="small"
+                value={taskMode}
+                onChange={(_, v) => v && setTaskMode(v)}
+                sx={{ mb: 2 }}
+              >
+                <ToggleButton value="commit">Replay a commit</ToggleButton>
+                <ToggleButton value="comprehension">Understand the code</ToggleButton>
+                <ToggleButton value="describe">Describe a task</ToggleButton>
+              </ToggleButtonGroup>
+
+              {taskMode === 'comprehension' && (
+                <>
+                  <Typography sx={{ color: C.dim, fontSize: '0.82rem', mb: 2, maxWidth: '68ch' }}>
+                    Questions with a right answer — architecture, execution flow, or a plan for
+                    a change. Graded against a rubric written from this repository, so both
+                    harnesses are scored against the identical list. No test suite involved,
+                    which is why this works on a repo whose own tests cannot fail.
+                  </Typography>
+                  <Button
+                    variant="outlined"
+                    disabled={proposeTasks.isPending}
+                    onClick={() => proposeTasks.mutate()}
+                    startIcon={proposeTasks.isPending ? <CircularProgress size={13} /> : null}
+                    sx={{ mb: 2 }}
+                  >
+                    {proposeTasks.isPending ? 'Reading the repository…' : 'Propose questions'}
+                  </Button>
+
+                  {proposed.map((t) => (
+                    <Box
+                      key={t.id}
+                      sx={{ mb: 1.5, pb: 1.5, borderBottom: `1px solid ${C.lineSoft}` }}
+                    >
+                      <FormControlLabel
+                        control={
+                          <Checkbox
+                            size="small"
+                            checked={describedTaskIds.includes(t.id)}
+                            onChange={(e) =>
+                              setDescribedTaskIds((prev) =>
+                                e.target.checked
+                                  ? [...prev, t.id]
+                                  : prev.filter((x) => x !== t.id),
+                              )
+                            }
+                          />
+                        }
+                        label={
+                          <Box sx={{ minWidth: 0 }}>
+                            <Mono color={C.text} size="0.78rem">
+                              {t.title}
+                            </Mono>
+                            <Typography sx={{ fontSize: '0.68rem', color: C.faint }}>
+                              {t.category.replace('_', ' ')} · graded on {t.rubric.length} criteria
+                            </Typography>
+                          </Box>
+                        }
+                        sx={{ display: 'flex', alignItems: 'flex-start' }}
+                      />
+                      <Box sx={{ pl: 4 }}>
+                        {t.rubric.map((c, i) => (
+                          <Typography
+                            key={i}
+                            sx={{ fontSize: '0.72rem', color: C.dim, mb: 0.25 }}
+                          >
+                            <Mono
+                              size="0.62rem"
+                              color={c.depth === 'deep' ? C.warn : C.faint}
+                            >
+                              {(c.depth ?? 'deep').slice(0, 4)}
+                            </Mono>{' '}
+                            {c.criterion}{' '}
+                            <Mono size="0.66rem" color={C.faint}>
+                              [{c.evidence}]
+                            </Mono>
+                          </Typography>
+                        ))}
+                        {t.dropped.length > 0 && (
+                          <Typography sx={{ fontSize: '0.68rem', color: C.warn, mt: 0.5 }}>
+                            {t.dropped.length} criterion/criteria dropped — cited paths that do
+                            not exist in this repo
+                          </Typography>
+                        )}
+                      </Box>
+                    </Box>
+                  ))}
+                </>
+              )}
+
+              {taskMode === 'commit' ? (
+                <>
+                  <Typography sx={{ color: C.dim, fontSize: '0.82rem', mb: 2, maxWidth: '68ch' }}>
+                    Tick up to five. Each commit's <strong>parent</strong> becomes the starting
+                    state and the commit itself is the known answer — the agent only ever sees a
+                    fresh snapshot at the parent, with no remotes and no future history. This is
+                    the strongest signal available, because the real tests shipped with the commit.
+                  </Typography>
+                  {commits.isLoading && <CircularProgress size={16} />}
+                  {/* Without this a failed clone renders as "no commits", which
+                      is what made a perfectly good GitHub repo look empty. */}
+                  {commits.isError && (
+                    <Alert severity="error" sx={{ mb: 2 }}>
+                      Could not read commits:{' '}
+                      {commits.error instanceof Error ? commits.error.message : 'unknown error'}
+                    </Alert>
+                  )}
+                  {askAi.isPending && (
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
+                      <CircularProgress size={14} />
+                      <Typography sx={{ fontSize: '0.76rem', color: C.dim }}>
+                        reading the README and the code to shortlist commits worth benchmarking…
+                      </Typography>
+                    </Box>
+                  )}
+                  {nominated.length > 0 && (
+                    <Box
+                      sx={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        mb: 1,
+                      }}
+                    >
+                      <Typography variant="overline">
+                        {usingShortlist
+                          ? `shortlisted · ${nominated.length}`
+                          : `all commits · ${commitList.length}`}
+                      </Typography>
+                      <Button size="small" onClick={() => setShowAllCommits((v) => !v)}>
+                        {usingShortlist ? 'show all commits' : 'show shortlist'}
+                      </Button>
+                    </Box>
+                  )}
+                  <Box sx={{ maxHeight: 380, overflowY: 'auto' }}>
+                    {commitList.map((c) => (
+                      <FormControlLabel
+                        key={c.sha}
+                        control={
+                          <Checkbox
+                            size="small"
+                            checked={selectedShas.includes(c.sha)}
+                            disabled={pickCommit.isPending}
+                            onChange={(e) => {
+                              if (e.target.checked) pickCommit.mutate(c.sha)
+                              else setSelectedShas((p) => p.filter((s) => s !== c.sha))
+                            }}
+                          />
+                        }
+                        label={
+                          <Box sx={{ minWidth: 0 }}>
+                            <Mono color={C.text} size="0.76rem">
+                              {(c.subject ?? '').slice(0, 72)}
+                            </Mono>
+                            <Typography
+                              sx={{ fontFamily: fonts.mono, fontSize: '0.64rem', color: C.faint }}
+                            >
+                              {c.sha.slice(0, 8)}
+                              {c.author ? ` · ${c.author}` : ''}
+                              {c.date ? ` · ${c.date.slice(0, 10)}` : ''}
+                            </Typography>
+                            {'why' in c && c.why && (
+                              <Typography
+                                sx={{ fontSize: '0.72rem', color: C.dim, mt: 0.25, maxWidth: '54ch' }}
+                              >
+                                {c.why}
+                              </Typography>
+                            )}
+                          </Box>
+                        }
+                        sx={{ display: 'flex', mb: 0.5, alignItems: 'flex-start' }}
+                      />
+                    ))}
+                  </Box>
+                  {!commits.isLoading && !commits.isError && (commits.data ?? []).length === 0 && (
+                    <Empty>No commits with a parent found — describe a task instead.</Empty>
+                  )}
+                </>
+              ) : taskMode === 'describe' ? (
+                <>
+                  <TextField
+                    fullWidth
+                    label="title"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    sx={{ mb: 1.5 }}
+                  />
+                  <TextField
+                    fullWidth
+                    multiline
+                    minRows={4}
+                    label="prompt"
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    placeholder="Describe the change precisely. The agent sees only this and the repository."
+                    sx={{ mb: 2 }}
+                  />
+                  <Button
+                    variant="outlined"
+                    disabled={!title.trim() || !prompt.trim() || describeTask.isPending}
+                    onClick={() => describeTask.mutate()}
+                  >
+                    Add task
+                  </Button>
+                </>
+              ) : null}
+
+              <Divider sx={{ my: 2.5 }} />
+              <Typography variant="overline">selected · {taskIds.length}</Typography>
+              {taskIds.length === 0 ? (
+                <Empty>Nothing selected yet.</Empty>
+              ) : (
+                <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                  {selectedShas.map((s) => (
+                    <Chip key={s} size="small" variant="outlined" label={s.slice(0, 8)} />
+                  ))}
+                  {describedTaskIds.map((id) => (
+                    <Chip key={id} size="small" variant="outlined" label="described" />
+                  ))}
+                </Box>
+              )}
+              <Box sx={{ mt: 2 }}>
+                <Button
+                  variant="contained"
+                  disabled={taskIds.length === 0}
+                  onClick={() => setStep(2)}
+                >
+                  Continue
+                </Button>
+              </Box>
+            </Panel>
+          </Grid>
+
+          <Grid size={{ xs: 12, md: 5 }}>
+            <Panel label="Hidden test candidates">
+              <Typography sx={{ color: C.dim, fontSize: '0.8rem', mb: 1.5 }}>
+                Extracted from the target commit and run only <em>after</em> the agent stops.
+                Low-confidence candidates start unapproved — nothing runs without your say-so.
+              </Typography>
+
+              <Button
+                size="small"
+                variant="outlined"
+                fullWidth
+                disabled={selectedShas.length === 0 || prepare.isPending}
+                onClick={() => prepare.mutate()}
+                startIcon={prepare.isPending ? <CircularProgress size={13} /> : null}
+                sx={{ mb: 1.5 }}
+              >
+                {prepare.isPending ? 'Preparing & verifying…' : 'Prepare & verify tests'}
+              </Button>
+              <Typography
+                sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.faint, mb: 2 }}
+              >
+                {prepare.isPending
+                  ? 'running the suite at the parent and the fix — minutes, not seconds'
+                  : 'repairs the test environment, and writes a test when the commit shipped none'}
+              </Typography>
+
+              {prepare.data?.reports.map((r) => (
+                <Alert
+                  key={r.task_id}
+                  severity={
+                    r.generated_test && !r.generated_test.verified ? 'warning' : 'success'
+                  }
+                  sx={{ mb: 1.5 }}
+                >
+                  <Typography sx={{ fontSize: '0.76rem' }}>
+                    prompt written by {r.prompt_source === 'model' ? r.provenance.model : 'the commit message'}
+                    {r.prompt_source === 'commit-message' && ' (model output was unusable or leaked the fix)'}
+                  </Typography>
+                  {r.generated_test && (
+                    <Typography sx={{ fontSize: '0.74rem', mt: 0.5 }}>
+                      {r.generated_test.verified
+                        ? `generated ${r.generated_test.relpath} — proven to fail before the fix and pass after it`
+                        : `no usable test after ${r.generated_test.attempts} attempt(s): ${r.generated_test.reject_reason}`}
+                    </Typography>
+                  )}
+                </Alert>
+              ))}
+
+              {hidden.length === 0 ? (
+                <Empty>None yet. Tick a commit, then prepare &amp; verify.</Empty>
+              ) : (
+                hidden.map((h) => (
+                  <Box key={h.id} sx={{ mb: 1.5, pb: 1.5, borderBottom: `1px solid ${C.lineSoft}` }}>
+                    <FormControlLabel
+                      control={
+                        <Checkbox
+                          size="small"
+                          checked={h.approved === true}
+                          onChange={async (e) => {
+                            await api.approveHiddenTest(h.id, e.target.checked)
+                            setHidden((prev) =>
+                              prev.map((x) =>
+                                x.id === h.id ? { ...x, approved: e.target.checked } : x,
+                              ),
+                            )
+                          }}
+                        />
+                      }
+                      label={
+                        <Mono size="0.76rem" color={C.text}>
+                          {h.relpath}
+                        </Mono>
+                      }
+                    />
+                    <Typography
+                      sx={{ fontFamily: fonts.mono, fontSize: '0.68rem', color: C.faint, pl: 4 }}
+                    >
+                      {h.change_type} · confidence {h.confidence}
+                      {h.reject_reason ? ` · ${h.reject_reason}` : ''}
+                    </Typography>
+                  </Box>
+                ))
+              )}
+            </Panel>
+          </Grid>
+        </Grid>
+      )}
+
+      {/* ---------------------------------------------------------------- 3 */}
+      {step === 2 && (
+        <Grid container spacing={2}>
+          <Grid size={{ xs: 12, md: 7 }}>
+            <Panel label="Harnesses" sx={{ mb: 2 }}>
+              {(availableHarnesses.data ?? []).map((h) => (
+                <FormControlLabel
+                  key={h.name}
+                  control={
+                    <Checkbox
+                      size="small"
+                      checked={harnesses.includes(h.name)}
+                      onChange={() => toggle(harnesses, h.name, setHarnesses)}
+                    />
+                  }
+                  label={
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                      <Mono color={C.text}>{h.name}</Mono>
+                      <Typography
+                        sx={{ fontFamily: fonts.mono, fontSize: '0.65rem', color: C.faint }}
+                      >
+                        {h.sandboxed ? 'sandboxed' : 'in-process'}
+                      </Typography>
+                    </Box>
+                  }
+                  sx={{ display: 'flex', mb: 0.5 }}
+                />
+              ))}
+            </Panel>
+
+            <Panel
+              label={`Models · ${sortedModels.length}`}
+              action={
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      size="small"
+                      checked={showPaid}
+                      onChange={(e) => {
+                        setShowPaid(e.target.checked)
+                        setModels([])
+                      }}
+                    />
+                  }
+                  label={
+                    <Typography sx={{ fontSize: '0.75rem', color: C.dim }}>
+                      include paid
+                    </Typography>
+                  }
+                />
+              }
+            >
+              {availableModels.isLoading && <CircularProgress size={16} />}
+              {availableModels.isError && (
+                <Alert severity="warning">
+                  Could not list models — check OPENROUTER_API_KEY in .env.
+                </Alert>
+              )}
+              <ToggleButtonGroup
+                exclusive
+                size="small"
+                value={provider}
+                onChange={(_, v) => {
+                  if (!v) return
+                  setProvider(v)
+                  setModels([]) // ids are provider-specific
+                }}
+                sx={{ mb: 1.5 }}
+              >
+                {(providers.data ?? []).map((p) => (
+                  <ToggleButton key={p.name} value={p.name} disabled={!p.configured}>
+                    {p.name}
+                    {!p.configured && ' · no key'}
+                  </ToggleButton>
+                ))}
+              </ToggleButtonGroup>
+
+              {activeProvider?.has_free_tier === false && (
+                <Alert severity="info" sx={{ mb: 1.5 }}>
+                  {provider} bills credits rather than offering a free per-token tier, so cost is
+                  recorded as $0.00 but is <strong>not</strong> verified the way an OpenRouter
+                  <code> :free</code> model is. Capabilities its listing omits show as
+                  <code> unknown</code>.
+                </Alert>
+              )}
+
+              {showPaid && activeProvider?.has_free_tier !== false && (
+                <Alert severity="warning" sx={{ mb: 1.5 }}>
+                  Paid models need OpenRouter credits, and spec §2 puts closed-source models out of
+                  scope — this tool benchmarks open-weight stacks. Open-weight-but-paid models
+                  (Kimi, GLM) are fine if you have credits.
+                </Alert>
+              )}
+              <TextField
+                fullWidth
+                value={modelFilter}
+                onChange={(e) => setModelFilter(e.target.value)}
+                placeholder="filter by name…"
+                sx={{ mb: 1.5 }}
+              />
+              <Box sx={{ maxHeight: 300, overflowY: 'auto' }}>
+                {sortedModels.map((m) => (
+                  <FormControlLabel
+                    key={m.model_id}
+                    control={
+                      <Checkbox
+                        size="small"
+                        checked={models.includes(m.model_id)}
+                        onChange={() => toggle(models, m.model_id, setModels)}
+                      />
+                    }
+                    label={
+                      <Box>
+                        <Mono color={C.text} size="0.76rem">
+                          {m.model_id}
+                        </Mono>
+                        <Typography
+                          sx={{ fontFamily: fonts.mono, fontSize: '0.64rem', color: C.faint }}
+                        >
+                          {m.context_length ? `${(m.context_length / 1000).toFixed(0)}k ctx` : ''}
+                          {m.is_free ? ' · free' : ' · paid'}
+                          {/* null is UNKNOWN, not unsupported — the provider
+                              simply does not report it. */}
+                          {m.supports_tools === null
+                            ? ' · tools unknown'
+                            : m.supports_tools
+                              ? ' · tools'
+                              : ' · no tools'}
+                        </Typography>
+                      </Box>
+                    }
+                    sx={{ display: 'flex', mb: 0.5 }}
+                  />
+                ))}
+              </Box>
+            </Panel>
+          </Grid>
+
+          <Grid size={{ xs: 12, md: 5 }}>
+            <Panel label="Matrix" sx={{ mb: 2 }}>
+              <Grid container spacing={2} sx={{ mb: 2 }}>
+                <Grid size={6}>
+                  <TextField
+                    fullWidth
+                    type="number"
+                    label="repetitions"
+                    value={reps}
+                    onChange={(e) => setReps(Math.max(1, Number(e.target.value)))}
+                  />
+                </Grid>
+                <Grid size={6}>
+                  <TextField
+                    fullWidth
+                    type="number"
+                    label="requests / run"
+                    value={budget}
+                    disabled={uncapped}
+                    onChange={(e) => setBudget(Math.max(1, Number(e.target.value)))}
+                  />
+                </Grid>
+                <Grid size={{ xs: 6, sm: 3 }}>
+                  <TextField
+                    fullWidth
+                    type="number"
+                    label="steps / run"
+                    value={steps}
+                    onChange={(e) => setSteps(Math.max(1, Number(e.target.value)))}
+                  />
+                </Grid>
+              </Grid>
+
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    size="small"
+                    checked={uncapped}
+                    disabled={activeProvider?.has_free_tier !== false}
+                    onChange={(e) => setUncapped(e.target.checked)}
+                  />
+                }
+                label={
+                  <Typography sx={{ fontSize: '0.78rem', color: C.dim }}>
+                    no request limit — stop when the agent finishes
+                  </Typography>
+                }
+              />
+              <Typography
+                sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.faint, mb: 2 }}
+              >
+                {activeProvider?.has_free_tier !== false
+                  ? 'unavailable on a free tier: one uncapped run would spend the daily quota'
+                  : uncapped
+                    ? 'bounded by the token ceiling and the 30-minute timeout instead. A run ' +
+                      'that times out having produced a patch is still graded.'
+                    : 'measured: one agent spent all 100 requests and 3.0M input tokens ' +
+                      'without ever deciding it was done'}
+              </Typography>
+
+              <Table size="small" sx={{ mb: 2 }}>
+                <TableBody>
+                  {[
+                    ['harnesses', harnesses.length],
+                    ['models', models.length],
+                    ['tasks', taskIds.length],
+                    ['repetitions', reps],
+                  ].map(([k, v]) => (
+                    <TableRow key={String(k)}>
+                      <TableCell
+                        sx={{
+                          border: 0,
+                          py: 0.4,
+                          pl: 0,
+                          color: C.faint,
+                          fontFamily: fonts.mono,
+                          fontSize: '0.72rem',
+                        }}
+                      >
+                        {k}
+                      </TableCell>
+                      <TableCell align="right" sx={{ border: 0, py: 0.4, pr: 0 }}>
+                        <Mono color={C.text}>{v}</Mono>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+
+              <Divider sx={{ mb: 2 }} />
+              <Grid container spacing={2}>
+                <Grid size={6}>
+                  <Stat label="total runs" value={runs} color={runs ? C.live : C.faint} />
+                </Grid>
+                <Grid size={6}>
+                  <Stat
+                    label="model requests"
+                    value={requests}
+                    color={overDailyCap ? C.warn : C.pass}
+                    hint={`free tier ≈ ${DAILY_FREE_REQUESTS}/day`}
+                  />
+                </Grid>
+              </Grid>
+
+              {reps < 3 && runs > 0 && (
+                <Alert severity="info" sx={{ mt: 2 }}>
+                  Under 3 repetitions every result is flagged statistically weak. Fine for a smoke
+                  test; not enough for a reliability claim.
+                </Alert>
+              )}
+              {overDailyCap && (
+                <Alert severity="warning" sx={{ mt: 2 }}>
+                  This needs {requests} requests — more than a free-tier day. Runs that hit the
+                  limit are parked as rate-limited and resume automatically, so the matrix takes
+                  longer rather than failing.
+                </Alert>
+              )}
+            </Panel>
+
+            {/* Collapsed by default; opens itself only when it needs the user. */}
+            <Panel sx={{ mb: 2 }}>
+              <Box
+                onClick={() => setSetupOpen((v) => !v)}
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  cursor: 'pointer',
+                  gap: 2,
+                }}
+              >
+                <Box>
+                  <Typography variant="overline">setup</Typography>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Mono size="0.76rem" color={needsAttention ? C.warn : C.dim}>
+                      {[
+                        analysis?.languages?.[0] ?? 'unknown',
+                        framework || 'no framework',
+                        baselineLabel,
+                      ].join(' · ')}
+                    </Mono>
+                    {runBaseline.isPending && <CircularProgress size={11} />}
+                  </Box>
+                </Box>
+                <Mono size="0.7rem" color={C.live}>
+                  {setupOpen ? 'hide' : 'review'}
+                </Mono>
+              </Box>
+
+              {/* unmountOnExit: collapsed fields stay in the DOM otherwise,
+                  so they remain tab-focusable while invisible. */}
+              <Collapse in={setupOpen} unmountOnExit>
+                <Divider sx={{ my: 2 }} />
+
+                <Typography variant="overline">commands</Typography>
+                <Box sx={{ mb: 1.5 }}>
+                  <Button
+                    size="small"
+                    variant="contained"
+                    disabled={decideStrategy.isPending || !repoId}
+                    onClick={() => decideStrategy.mutate()}
+                    startIcon={
+                      decideStrategy.isPending ? <CircularProgress size={12} /> : null
+                    }
+                    sx={{ mr: 1 }}
+                  >
+                    {decideStrategy.isPending
+                      ? 'Analysing and verifying…'
+                      : 'Analyse & verify'}
+                  </Button>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    disabled={askAi.isPending || !repoId}
+                    onClick={() => askAi.mutate()}
+                    startIcon={askAi.isPending ? <CircularProgress size={12} /> : null}
+                  >
+                    {askAi.isPending ? 'Analyzing repo…' : 'Suggest with AI'}
+                  </Button>
+                  {/* This is the only feature that transmits repo content
+                      anywhere — say so before it is pressed, not after. */}
+                  <Typography
+                    sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.faint, mt: 0.75 }}
+                  >
+                    both send file names, README, manifests and CI config to the model provider ·
+                    secrets (.env, keys) are never included · “Analyse &amp; verify” also RUNS the
+                    commands in a container to prove they produce a score
+                  </Typography>
+
+                  {strategy && (
+                    <Box
+                      sx={{
+                        mt: 1.25,
+                        p: 1.25,
+                        border: '1px solid',
+                        // An unscoreable repo is the finding, not an error —
+                        // but it must not be quietly hopeful either.
+                        borderColor: strategy.scoreable ? C.faint : 'warning.main',
+                        borderRadius: 1,
+                      }}
+                    >
+                      <Typography
+                        sx={{
+                          fontFamily: fonts.mono,
+                          fontSize: '0.72rem',
+                          color: strategy.scoreable ? C.text : 'warning.main',
+                        }}
+                      >
+                        {strategy.strategy.replace('_', ' ')}
+                        {strategy.scoreable ? '' : ' — this repo cannot be scored'}
+                      </Typography>
+                      <Typography
+                        sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.dim, mt: 0.5 }}
+                      >
+                        {strategy.meaning}
+                      </Typography>
+                      {/* The ladder, so a verdict can be argued with rather
+                          than merely accepted. */}
+                      {strategy.attempts.map((a) => (
+                        <Typography
+                          key={`${a.rung}-${a.strategy}`}
+                          sx={{
+                            fontFamily: fonts.mono,
+                            fontSize: '0.64rem',
+                            color: a.ok ? C.text : C.faint,
+                            mt: 0.4,
+                          }}
+                        >
+                          {a.ok ? '✓' : '✗'} rung {a.rung} {a.strategy.replace('_', ' ')} — {a.reason}
+                        </Typography>
+                      ))}
+                      <Typography
+                        sx={{
+                          fontFamily: fonts.mono,
+                          fontSize: '0.62rem',
+                          color: C.faint,
+                          mt: 0.75,
+                        }}
+                      >
+                        decided by {strategy.provenance.provider}/{strategy.provenance.model} ·
+                        verified by running the commands, not by asking
+                      </Typography>
+                    </Box>
+                  )}
+                  {suggestion && (
+                    <Typography
+                      sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.dim, mt: 0.75 }}
+                    >
+                      suggested by {suggestion.model_id} · confidence {suggestion.confidence} ·
+                      read {suggestion.files_read.length} file
+                      {suggestion.files_read.length === 1 ? '' : 's'} · review and save below
+                    </Typography>
+                  )}
+                </Box>
+                <TextField
+                  fullWidth
+                  label="test"
+                  value={commands.test ?? ''}
+                  onChange={(e) => setCommands({ ...commands, test: e.target.value })}
+                  error={!testCommand}
+                  helperText={
+                    suggestion?.rationale?.test
+                      ? `AI: ${suggestion.rationale.test}`
+                      : testCommand
+                        ? 'how the evaluator runs your tests'
+                        : 'required — without it there is no correctness signal'
+                  }
+                  sx={{ mb: 2, mt: 1 }}
+                />
+                {OPTIONAL_COMMANDS.map((field) => (
+                  <TextField
+                    key={field}
+                    fullWidth
+                    label={`${field} (optional)`}
+                    value={commands[field] ?? ''}
+                    onChange={(e) => setCommands({ ...commands, [field]: e.target.value })}
+                    helperText={
+                      suggestion?.rationale?.[field]
+                        ? `AI: ${suggestion.rationale[field]}`
+                        : 'leave blank to skip'
+                    }
+                    sx={{ mb: 1.5 }}
+                  />
+                ))}
+                <TextField
+                  fullWidth
+                  label="test framework"
+                  value={framework}
+                  onChange={(e) => setFramework(e.target.value)}
+                  helperText="pytest, vitest, jest… decides how test output is parsed"
+                  sx={{ mb: 2 }}
+                />
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={() => saveCommands.mutate()}
+                  disabled={saveCommands.isPending}
+                  sx={{ mb: 2 }}
+                >
+                  Save commands
+                </Button>
+
+                {suggestion && suggestion.commits.length > 0 && (
+                  <>
+                    <Divider sx={{ my: 2 }} />
+                    <Typography variant="overline">suggested commits to benchmark</Typography>
+                    <Typography sx={{ color: C.dim, fontSize: '0.78rem', mb: 1.5 }}>
+                      Commits that fix behaviour and touch tests grade best. Add them here without
+                      going back a step.
+                    </Typography>
+                    {suggestion.commits.map((c) => {
+                      const added = selectedShas.includes(c.sha)
+                      return (
+                        <Box
+                          key={c.sha}
+                          sx={{
+                            display: 'flex',
+                            alignItems: 'flex-start',
+                            justifyContent: 'space-between',
+                            gap: 1,
+                            py: 1,
+                            borderBottom: `1px solid ${C.lineSoft}`,
+                          }}
+                        >
+                          <Box sx={{ minWidth: 0 }}>
+                            <Mono size="0.74rem" color={C.text}>
+                              {c.subject || c.sha.slice(0, 8)}
+                            </Mono>
+                            <Typography
+                              sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.faint }}
+                            >
+                              {c.sha.slice(0, 8)} · {c.why}
+                            </Typography>
+                          </Box>
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            disabled={added || pickCommit.isPending}
+                            onClick={() => pickCommit.mutate(c.sha)}
+                          >
+                            {added ? 'added' : 'add as task'}
+                          </Button>
+                        </Box>
+                      )
+                    })}
+                  </>
+                )}
+
+                <Divider sx={{ my: 2 }} />
+                <Typography variant="overline">baseline</Typography>
+                <Typography sx={{ color: C.dim, fontSize: '0.78rem', mb: 1.5, maxWidth: '60ch' }}>
+                  Runs your commands on a clean snapshot before any agent touches the repo, so
+                  failures that already existed are never blamed on an agent.
+                </Typography>
+                {baseline && (
+                  <Grid container spacing={2} sx={{ mb: 1.5 }}>
+                    {Object.entries(baseline.steps).map(([name, s]) => (
+                      <Grid size="auto" key={name}>
+                        <Stat
+                          label={name}
+                          value={s.exit_code === 0 ? 'pass' : `exit ${s.exit_code}`}
+                          color={s.exit_code === 0 ? C.pass : C.warn}
+                        />
+                      </Grid>
+                    ))}
+                    <Grid size="auto">
+                      <Stat label="baseline tests" value={baseline.test_case_count} />
+                    </Grid>
+                  </Grid>
+                )}
+                {baselineStale && (
+                  <Alert severity="info" sx={{ mb: 1.5 }}>
+                    Commands changed since this baseline ran — re-run it so regressions are measured
+                    against the right starting point.
+                  </Alert>
+                )}
+                {baselineBroken && (
+                  <Alert severity="error" sx={{ mb: 1.5 }}>
+                    Baseline could not establish a signal — install or build failed, or tests could
+                    not be collected. Fix the commands above and re-run.
+                  </Alert>
+                )}
+                {/* The actual failure output. "exit 2" alone is undiagnosable. */}
+                {baseline &&
+                  Object.entries(baseline.steps)
+                    .filter(([, s]) => s.exit_code !== 0 && s.output)
+                    .map(([name, s]) => (
+                      <Box key={name} sx={{ mb: 1.5 }}>
+                        <Typography variant="overline">{name} output</Typography>
+                        <Box
+                          component="pre"
+                          sx={{
+                            m: 0,
+                            p: 1.5,
+                            maxHeight: 260,
+                            overflow: 'auto',
+                            backgroundColor: C.bg,
+                            border: `1px solid ${C.lineSoft}`,
+                            fontFamily: fonts.mono,
+                            fontSize: '0.68rem',
+                            lineHeight: 1.5,
+                            color: C.dim,
+                            whiteSpace: 'pre-wrap',
+                          }}
+                        >
+                          {s.output}
+                        </Box>
+                      </Box>
+                    ))}
+                {baseline?.warn && !baselineBroken && (
+                  <Alert severity="warning" sx={{ mb: 1.5 }}>
+                    Baseline is partially failing. You can proceed — those failures are excluded
+                    from regression counting.
+                  </Alert>
+                )}
+                <Button
+                  size="small"
+                  variant="outlined"
+                  disabled={runBaseline.isPending || !repoId}
+                  onClick={() => runBaseline.mutate(repoId!)}
+                >
+                  {runBaseline.isPending ? 'Running…' : 'Re-run baseline'}
+                </Button>
+              </Collapse>
+            </Panel>
+
+            <Button
+              fullWidth
+              size="large"
+              variant="contained"
+              disabled={blockers.length > 0 || launch.isPending}
+              onClick={() => launch.mutate()}
+              startIcon={launch.isPending ? <CircularProgress size={14} /> : null}
+            >
+              {/* Naming the step matters: creation first verifies every model
+                  can actually be called, which takes as long as one model call.
+                  Unlabelled, that read as a hang. */}
+              {launch.isPending
+                ? 'Verifying models…'
+                : `Start ${runs} run${runs === 1 ? '' : 's'}`}
+            </Button>
+            {launch.isPending && (
+              <Typography
+                sx={{ fontFamily: fonts.mono, fontSize: '0.66rem', color: C.faint, mt: 0.75 }}
+              >
+                checking each model answers on this account before queueing anything
+              </Typography>
+            )}
+            {launch.isError && (
+              // Shown here, next to the selection that caused it, rather than
+              // only as a toast that scrolls away from the models to change.
+              <Typography
+                sx={{ fontFamily: fonts.mono, fontSize: '0.7rem', color: C.warn, mt: 0.75 }}
+              >
+                {(launch.error as Error).message}
+              </Typography>
+            )}
+            {/* Every blocker, not just the first — hiding the rest makes the
+                button feel like it never unlocks. */}
+            {blockers.map((reason) => (
+              <Typography
+                key={reason}
+                sx={{ fontFamily: fonts.mono, fontSize: '0.7rem', color: C.warn, mt: 0.75 }}
+              >
+                {reason}
+              </Typography>
+            ))}
+          </Grid>
+        </Grid>
+      )}
+    </Box>
+  )
+}

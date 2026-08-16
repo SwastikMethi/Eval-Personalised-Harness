@@ -1,17 +1,9 @@
 import { useQuery } from '@tanstack/react-query'
-import {
-  Alert,
-  AppBar,
-  Box,
-  Card,
-  CardContent,
-  Chip,
-  Container,
-  Grid,
-  Toolbar,
-  Typography,
-} from '@mui/material'
+import { Alert, Box, Button, Grid, Typography } from '@mui/material'
+import { Link } from 'react-router-dom'
 import { api } from '../api'
+import { Empty, Mono, PageTitle, Panel } from '../components/primitives'
+import { C, fonts } from '../theme'
 
 export default function Dashboard() {
   const health = useQuery({ queryKey: ['health'], queryFn: api.health, retry: 1 })
@@ -20,64 +12,84 @@ export default function Dashboard() {
 
   return (
     <Box>
-      <AppBar position="static" elevation={0}>
-        <Toolbar>
-          <Typography variant="h6" sx={{ flexGrow: 1 }}>
-            Agent Stack Optimizer
-          </Typography>
-          <Chip
-            label={health.isSuccess ? 'backend: ok' : 'backend: offline'}
-            color={health.isSuccess ? 'success' : 'error'}
-            size="small"
-          />
-        </Toolbar>
-      </AppBar>
-      <Container sx={{ mt: 4 }}>
-        {health.isError && (
-          <Alert severity="warning" sx={{ mb: 2 }}>
-            Backend unreachable — run <code>make backend</code>.
-          </Alert>
-        )}
-        <Grid container spacing={2}>
-          <Grid size={{ xs: 12, md: 6 }}>
-            <Card variant="outlined">
-              <CardContent>
-                <Typography variant="overline">Recent repositories</Typography>
-                {repositories.data?.length ? (
-                  repositories.data.map((r) => (
-                    <Typography key={r.id} variant="body2">
-                      {r.name} <Chip label={r.source} size="small" />
-                    </Typography>
-                  ))
-                ) : (
-                  <Typography variant="body2" color="text.secondary">
-                    No repositories yet.
-                  </Typography>
-                )}
-              </CardContent>
-            </Card>
-          </Grid>
-          <Grid size={{ xs: 12, md: 6 }}>
-            <Card variant="outlined">
-              <CardContent>
-                <Typography variant="overline">Recent experiments</Typography>
-                {experiments.data?.length ? (
-                  experiments.data.map((e) => (
-                    <Typography key={e.id} variant="body2">
-                      <a href={`/experiments/${e.id}`}>{e.name}</a>{' '}
-                      <Chip label={e.status} size="small" />
-                    </Typography>
-                  ))
-                ) : (
-                  <Typography variant="body2" color="text.secondary">
-                    No experiments yet.
-                  </Typography>
-                )}
-              </CardContent>
-            </Card>
-          </Grid>
+      <PageTitle
+        title="Which stack is best for your repo?"
+        sub="Benchmark coding-agent harnesses against open-weight models on tasks from your own repository, and get quality, reliability and efficiency recommendations."
+        action={
+          <Button component={Link} to="/new" variant="contained" size="large">
+            New run
+          </Button>
+        }
+      />
+
+      {health.isError && (
+        <Alert severity="warning" sx={{ mb: 3 }}>
+          Backend unreachable — run <code>make backend</code>.
+        </Alert>
+      )}
+
+      <Grid container spacing={2}>
+        <Grid size={{ xs: 12, md: 7 }}>
+          <Panel label="Recent experiments">
+            {experiments.data?.length ? (
+              experiments.data
+                .slice()
+                .reverse()
+                .map((e) => (
+                  <Box
+                    key={e.id}
+                    component={Link}
+                    to={`/experiments/${e.id}`}
+                    sx={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      py: 1.1,
+                      px: 1,
+                      mx: -1,
+                      textDecoration: 'none',
+                      borderBottom: `1px solid ${C.lineSoft}`,
+                      '&:hover': { backgroundColor: C.surfaceHi },
+                    }}
+                  >
+                    <Mono color={C.text}>{e.name}</Mono>
+                    <Mono size="0.7rem" color={e.status === 'running' ? C.live : C.faint}>
+                      {e.status}
+                    </Mono>
+                  </Box>
+                ))
+            ) : (
+              <Empty>No experiments yet — start one with “New run”.</Empty>
+            )}
+          </Panel>
         </Grid>
-      </Container>
+
+        <Grid size={{ xs: 12, md: 5 }}>
+          <Panel label="Repositories">
+            {repositories.data?.length ? (
+              repositories.data.map((r) => (
+                <Box key={r.id} sx={{ py: 0.9, borderBottom: `1px solid ${C.lineSoft}` }}>
+                  <Mono color={C.text}>{r.name}</Mono>
+                  <Typography
+                    sx={{
+                      fontFamily: fonts.mono,
+                      fontSize: '0.66rem',
+                      color: C.faint,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {r.source} · {r.path_or_url}
+                  </Typography>
+                </Box>
+              ))
+            ) : (
+              <Empty>No repositories registered.</Empty>
+            )}
+          </Panel>
+        </Grid>
+      </Grid>
     </Box>
   )
 }

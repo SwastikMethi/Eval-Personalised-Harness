@@ -7,6 +7,7 @@ the host; the Docker executor lands in Stage 4 behind the same shape.
 
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -66,3 +67,8 @@ def run_host_command(
             duration_s=time.monotonic() - start,
             timed_out=True,
         )
+
+
+# What baseline and evaluators call. `run_host_command` and `ContainerExecutor`
+# both satisfy it, so callers cannot tell which one they were handed.
+Executor = Callable[..., CommandResult]

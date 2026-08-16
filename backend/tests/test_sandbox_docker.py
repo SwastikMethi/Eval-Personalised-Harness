@@ -4,13 +4,19 @@ Skipped automatically when Docker is unavailable.
 """
 
 import subprocess
+import threading
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
 
-from app.sandboxes.manager import RUN_LABEL, SandboxManager, docker_available
+from app.sandboxes.manager import PROXY_PORT, RUN_LABEL, SandboxManager, docker_available
 
-pytestmark = pytest.mark.skipif(not docker_available(), reason="docker unavailable")
+pytestmark = [
+    pytest.mark.docker,
+    pytest.mark.skipif(not docker_available(), reason="docker unavailable"),
+]
 
 IMAGE = "python:3.12-slim"  # sealing tests don't need the harness image
 
@@ -21,6 +27,42 @@ async def manager():  # type: ignore[no-untyped-def]
     yield m
     for run_id in list(m._containers):
         await m.cleanup(run_id)
+
+
+@pytest.fixture
+def health_endpoint() -> Iterator[None]:
+    """Guarantee something answers /api/v1/health on the proxy port.
+
+    seal() fail-closes when the model proxy is unreachable, so it needs a
+    responder. Without this the test passed only when a dev backend happened
+    to be running on 8005 — `make test` failed outright with the backend
+    stopped, which is not a real defect in the code under test.
+    """
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - stdlib naming
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok"}')
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+    try:
+        server = HTTPServer(("0.0.0.0", PROXY_PORT), Handler)  # noqa: S104 - container must reach it
+    except OSError:
+        # Port taken: the real backend is up and already serves this route.
+        yield
+        return
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 async def test_container_labeled_and_limited(manager: SandboxManager, tmp_path: Path) -> None:
@@ -34,7 +76,9 @@ async def test_container_labeled_and_limited(manager: SandboxManager, tmp_path: 
     assert "no-new-privileges" in host_config["SecurityOpt"]
 
 
-async def test_seal_blocks_egress(manager: SandboxManager, tmp_path: Path) -> None:
+async def test_seal_blocks_egress(
+    manager: SandboxManager, tmp_path: Path, health_endpoint: None
+) -> None:
     await manager.create("t-seal", tmp_path)
     # PREP phase: egress works (skip assert if host itself is offline)
     prep = await manager.exec(

@@ -13,3 +13,8 @@ frontend/dist/
 *.db-wal
 *.db-shm
 .DS_Store
+
+# Obsidian: keep shared config, drop machine-specific workspace/cache
+vault/.obsidian/workspace*.json
+vault/.obsidian/cache
+.gstack/

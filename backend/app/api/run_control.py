@@ -46,6 +46,46 @@ def pause_experiment(
     return {"ok": True}
 
 
+@router.post("/experiments/{experiment_id}/cancel")
+async def cancel_experiment(
+    experiment_id: str, request: Request, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    """Cancel every non-terminal run in an experiment (spec §19)."""
+    from sqlalchemy import select
+
+    from app.models import BenchmarkRun, ExperimentCombination
+    from app.models.core import TERMINAL_STATES, RunState
+
+    exp = session.get(Experiment, experiment_id)
+    if exp is None:
+        raise HTTPException(404, "experiment not found")
+    worker = _worker(request)
+    worker.pause_experiment(experiment_id)  # stop claiming while we cancel
+
+    combo_ids = session.scalars(
+        select(ExperimentCombination.id).where(
+            ExperimentCombination.experiment_id == experiment_id
+        )
+    ).all()
+    run_ids = (
+        session.scalars(
+            select(BenchmarkRun.id).where(BenchmarkRun.combination_id.in_(list(combo_ids)))
+        ).all()
+        if combo_ids
+        else []
+    )
+    cancelled = 0
+    for run_id in run_ids:
+        run = session.get(BenchmarkRun, run_id)
+        if run is None or RunState(run.state) in TERMINAL_STATES:
+            continue
+        if await worker.cancel_run(run_id):
+            cancelled += 1
+    exp.status = "cancelled"
+    session.commit()
+    return {"ok": True, "cancelled": cancelled}
+
+
 @router.post("/experiments/{experiment_id}/resume")
 def resume_experiment(
     experiment_id: str, request: Request, session: Session = Depends(get_session)

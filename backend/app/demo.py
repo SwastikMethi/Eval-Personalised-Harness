@@ -16,6 +16,9 @@ FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "python-bug-repo"
 
 
 async def main() -> int:
+    # The proxy routes per-run by the combination's provider, so this demo's
+    # `fake` cells stay on the fake provider even when a real key is configured.
+    # Zero API cost, per spec §22 — free tier grants ~50 requests a DAY.
     app = create_app(start_worker=True)
     transport = httpx.ASGITransport(app=app)
     async with app.router.lifespan_context(app), httpx.AsyncClient(

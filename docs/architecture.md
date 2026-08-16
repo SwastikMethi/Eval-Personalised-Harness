@@ -6,7 +6,7 @@ Local, single-user platform benchmarking harness × model combinations against t
 
 ```mermaid
 flowchart LR
-    UI[React dashboard :3000] --> API[FastAPI :8000 native host process]
+    UI[React dashboard :3000] --> API[FastAPI :8005 native host process]
     API --> DB[(SQLite WAL)]
     API --> Q[asyncio queue worker\nsingle scheduler, semaphore concurrency]
     Q --> SM[Sandbox manager]
@@ -43,7 +43,7 @@ Crash recovery: containers are labeled `aso.run_id`; on startup a reconciliation
 ## Leakage prevention (historical replay)
 
 1. Workspace = `git archive` at the **base** commit extracted into a fresh directory, then `git init` + one synthetic commit. No original history, no remotes, no hooks. The solution commit never enters the sandbox.
-2. Two-phase network: **PREP** (bridge, egress allowed — dependency install and baseline run before any agent code executes) → **sealed** (per-run `internal: true` network; fail-closed probe verifies external egress is dead; the model proxy stays reachable via host-gateway).
+2. Two-phase network: **PREP** (bridge, egress allowed — dependency install and baseline run before any agent code executes) → **sealed** (per-run `internal: true` network). An internal network has no default route at all, including to the host gateway, so the proxy is reached via a per-run **relay container** attached to both networks. `seal()` fail-closes in both directions: external egress must be dead *and* the proxy reachable.
 3. Hidden tests are extracted from the target commit conservatively (tests importing target-only modules are rejected), require user approval, and run only after the agent stops.
 4. The container receives a short-lived per-run token, never the OpenRouter key. The proxy pins the model, enforces request/token/spend budgets, and records every request.
 
@@ -51,7 +51,7 @@ Crash recovery: containers are labeled `aso.run_id`; on startup a reconciliation
 
 Grading never happens in the agent's workspace. The only agent input is the patch, applied to a fresh snapshot and run with evaluator-owned commands. Patches touching test files, CI config, or Makefiles score zero (prohibited-file gate). Regressions are detected by per-test-case identity against the baseline (vanished tests count as regressions). When no deterministic signal exists the task is marked `INSUFFICIENT_EVALUATION_SIGNAL` and produces no winner.
 
-MVP caveat: evaluator commands execute on the host against the fresh snapshot (same trust level as baseline validation). Moving evaluation execution into a fresh container is the next hardening step.
+Baseline and evaluation execute **inside a container**, not on the host. Running them on the host let `pip` and the test runner resolve to different interpreters, so an install could report success while installing nothing the tests could see. Dependencies are installed once per repo into a prepared image reused by the baseline, every evaluation and every agent run; the install command still runs inside, so a dependency added by an agent's patch is picked up.
 
 ## Scoring
 
