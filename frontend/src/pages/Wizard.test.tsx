@@ -82,11 +82,22 @@ async function reachCombos() {
   return user
 }
 
+/**
+ * Open the stack picker. Harnesses and models used to be two lists sitting on
+ * the page; they are now a dialog behind the "add a stack" card, because the
+ * screen's subject is the pairing, not the two ingredient lists.
+ */
+async function openPicker(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole('button', { name: /Choose harnesses and models|Add agent stack/ }))
+}
+
 /** …and on through Agent stacks to Review, where the matrix and launch live. */
 async function reachReview() {
   const user = await reachCombos()
+  await openPicker(user)
   await user.click(await screen.findByLabelText(/mini-swe-agent/))
   await user.click(await screen.findByLabelText(/gpt-oss-20b/))
+  await user.click(screen.getByRole('button', { name: /^Done$/ }))
   await user.click(await screen.findByRole('button', { name: /^Continue$/ }))
   return user
 }
@@ -97,7 +108,7 @@ describe('Setup wizard', () => {
     await reachCombos()
 
     // The whole point: the user got here without meeting an optional field.
-    expect(await screen.findByText('Harnesses')).toBeInTheDocument()
+    expect(await screen.findByText('Choose the stacks')).toBeInTheDocument()
     expect(screen.queryByLabelText('build (optional)')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('typecheck (optional)')).not.toBeInTheDocument()
   })
@@ -152,9 +163,11 @@ describe('Setup wizard', () => {
   it('computes the expanded matrix from the selections', async () => {
     mockRepo()
     const user = await reachCombos()
+    await openPicker(user)
     await user.click(await screen.findByLabelText(/mini-swe-agent/))
     await user.click(screen.getByLabelText(/smolagents/))
     await user.click(await screen.findByLabelText(/gpt-oss-20b/))
+    await user.click(screen.getByRole('button', { name: /^Done$/ }))
     await user.click(await screen.findByRole('button', { name: /^Continue$/ }))
 
     // 2 harnesses × 1 model × 1 task × 1 rep
@@ -307,6 +320,7 @@ describe('Setup wizard', () => {
       ),
     )
     const user = await reachCombos()
+    await openPicker(user)
     await user.click(await screen.findByRole('button', { name: /nvidia/ }))
     expect(await screen.findByText(/deepseek-coder/)).toBeInTheDocument()
   })
@@ -320,6 +334,7 @@ describe('Setup wizard', () => {
       ),
     )
     const user = await reachCombos()
+    await openPicker(user)
     await user.click(await screen.findByRole('button', { name: /nvidia/ }))
 
     // "no tools" would assert a capability we cannot read from the listing.

@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../../api'
 import { color, space } from '../../design/tokens'
 import { font, type } from '../../design/typography'
-import { Button, Check, Field, Metric, Notice, Panel, Row } from '../../ui'
+import { Button, Check, Field, Metric, Notice, Panel, Row, ScreenTitle, StepItem, Steps } from '../../ui'
 import SetupPanel from './SetupPanel'
 import { DAILY_FREE_REQUESTS, type Wizard } from './useWizard'
 
@@ -30,14 +30,20 @@ export default function StepReview({ w }: { w: Wizard }) {
   })
 
   return (
-    <div
-      style={{
-        display: 'grid',
-        gridTemplateColumns: 'minmax(0, 1fr) minmax(320px, 1fr)',
-        gap: space[4],
-        alignItems: 'start',
-      }}
-    >
+    <>
+      <ScreenTitle
+        ask="What exactly will happen?"
+        title={w.blockers.length === 0 ? 'Ready to run' : 'Not ready yet'}
+        lede="Nothing is queued and nothing is spent until you start. This is the last screen before either."
+      />
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(0, 1fr) minmax(320px, 1fr)',
+          gap: space[4],
+          alignItems: 'start',
+        }}
+      >
       <div>
         <Panel label="Matrix">
           <div
@@ -242,18 +248,25 @@ export default function StepReview({ w }: { w: Wizard }) {
 
         {/* Every blocker, not just the first — hiding the rest makes the button
             feel like it never unlocks. */}
-        {w.blockers.map((reason) => (
-          <div key={reason} style={{ ...type.caption, color: color.warn, marginTop: space[2] }}>
-            {reason}
+        {w.blockers.length > 0 && (
+          <div style={{ marginTop: space[4] }}>
+            <Steps>
+              {w.blockers.map((reason) => (
+                <StepItem key={reason} state="failed">
+                  {reason}
+                </StepItem>
+              ))}
+            </Steps>
           </div>
-        ))}
+        )}
 
         <Row style={{ marginTop: space[4] }}>
           <Button size="sm" variant="ghost" onClick={() => w.setStep(2)}>
             ← Back to stacks
           </Button>
         </Row>
+        </div>
       </div>
-    </div>
+    </>
   )
 }

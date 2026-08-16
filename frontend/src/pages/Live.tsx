@@ -1,12 +1,24 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { AnimatePresence, motion } from 'motion/react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { api } from '../api'
 import { color, radius, space, stateTone } from '../design/tokens'
-import { respectMotion, rise } from '../design/motion'
 import { font, type } from '../design/typography'
-import { Button, Empty, Metric, Notice, Panel, Row, ScrollX, Status, Tabs } from '../ui'
+import {
+  Button,
+  Empty,
+  Metric,
+  Notice,
+  Panel,
+  Row,
+  ScreenTitle,
+  ScrollX,
+  Segmented,
+  StackCard,
+  Status,
+} from '../ui'
+import { useStage } from '../stages'
 import { useExperimentStream } from '../useExperimentStream'
 import Results from './Results'
 import RunPanel from './RunPanel'
@@ -32,14 +44,21 @@ const td: React.CSSProperties = {
 }
 const tdr: React.CSSProperties = { ...td, textAlign: 'right' }
 
-const TABS = ['Live', 'Comparison']
-
 export default function Live() {
   const { id } = useParams<{ id: string }>()
-  const [tab, setTab] = useState(TABS[0])
+  // Live and Results are the last two rail stages, so the rail is what moves
+  // between them. An in-content tab bar as well would be the same navigation
+  // rendered twice, and the two could disagree.
+  const { onResults, setOnResults } = useStage()
+  // A freshly opened experiment starts on Live regardless of where the previous
+  // one was left.
+  useEffect(() => setOnResults(false), [id, setOnResults])
   // Selecting a run opens its detail in place. The old build made this a
   // separate page, which meant losing sight of the matrix to inspect one cell.
   const [selected, setSelected] = useState<string | null>(null)
+  // Cards read better, but a 3×4×3 matrix is 36 of them. Null means "decide
+  // from the size"; picking either option pins it.
+  const [density, setDensity] = useState<'cards' | 'table' | null>(null)
   const { progress, events, connected, finished } = useExperimentStream(id)
 
   const meta = useQuery({
@@ -68,51 +87,44 @@ export default function Live() {
   const totalTokens =
     state?.runs.reduce((n, r) => n + (r.input_tokens ?? 0) + (r.output_tokens ?? 0), 0) ?? 0
 
+  const CARD_LIMIT = 12
+  const dense = density === null ? (state?.runs.length ?? 0) > CARD_LIMIT : density === 'table'
+
   return (
     <div>
-      <motion.header
-        variants={respectMotion(rise)}
-        initial="hidden"
-        animate="shown"
-        style={{
-          display: 'flex',
-          alignItems: 'flex-end',
-          justifyContent: 'space-between',
-          gap: space[5],
-          flexWrap: 'wrap',
-          marginBottom: space[5],
-        }}
-      >
-        <div>
-          <h1 style={{ ...type.title, fontWeight: 400, marginBottom: space[2] }}>
-            {meta.data?.name ?? 'Experiment'}
-          </h1>
-          <p style={{ ...type.body, color: color.dim }}>
-            {state?.finished
-              ? 'Finished. The comparison ranks every combination that produced a usable signal.'
-              : 'Executing. Each row is one repetition of one harness × model pair.'}
-          </p>
-        </div>
-        {!state?.finished && (
-          <Row gap={space[2]}>
-            <Button size="sm" disabled={pause.isPending} onClick={() => pause.mutate()}>
-              Pause
-            </Button>
-            <Button size="sm" disabled={resume.isPending} onClick={() => resume.mutate()}>
-              Resume
-            </Button>
-            <Button
-              size="sm"
-              variant="danger"
-              disabled={cancelAll.isPending}
-              onClick={() => cancelAll.mutate()}
-            >
-              Cancel all
-            </Button>
-          </Row>
-        )}
-      </motion.header>
+      {!onResults && (
+      <ScreenTitle
+        ask="What are the agents doing?"
+        title={meta.data?.name ?? 'Experiment'}
+        lede={
+          state?.finished
+            ? 'Finished. Results ranks every stack that produced a usable signal.'
+            : `${state?.done ?? 0} of ${state?.total ?? 0} complete · each card is one repetition of one stack.`
+        }
+        action={
+          !state?.finished && (
+            <Row gap={space[2]}>
+              <Button size="sm" disabled={pause.isPending} onClick={() => pause.mutate()}>
+                Pause
+              </Button>
+              <Button size="sm" disabled={resume.isPending} onClick={() => resume.mutate()}>
+                Resume
+              </Button>
+              <Button
+                size="sm"
+                variant="danger"
+                disabled={cancelAll.isPending}
+                onClick={() => cancelAll.mutate()}
+              >
+                Cancel experiment
+              </Button>
+            </Row>
+          )
+        }
+      />
+      )}
 
+      {!onResults && (
       <Panel style={{ padding: 0, overflow: 'hidden' }}>
         <div
           style={{
@@ -156,8 +168,9 @@ export default function Live() {
           />
         </div>
       </Panel>
+      )}
 
-      {throttled.length > 0 && (
+      {!onResults && throttled.length > 0 && (
         <Notice tone="warn">
           {throttled.length} run{throttled.length === 1 ? '' : 's'} hit provider rate limits. They
           are parked and resume automatically with backoff — nothing is lost, the matrix just takes
@@ -165,9 +178,7 @@ export default function Live() {
         </Notice>
       )}
 
-      <Tabs tabs={TABS} active={tab} onSelect={setTab} />
-
-      {tab === 'Live' && (
+      {!onResults && (
         <>
           <div
             style={{
@@ -177,9 +188,77 @@ export default function Live() {
               alignItems: 'start',
             }}
           >
-            <Panel label="Runs">
+            <Panel
+              label={`Runs · ${state?.runs.length ?? 0}`}
+              action={
+                (state?.runs.length ?? 0) > 0 && (
+                  <Segmented
+                    value={dense ? 'table' : 'cards'}
+                    onChange={(v) => setDensity(v)}
+                    options={[
+                      { value: 'cards' as const, label: 'Cards' },
+                      { value: 'table' as const, label: 'Table' },
+                    ]}
+                  />
+                )
+              }
+            >
               {!state || state.runs.length === 0 ? (
                 <Empty>No runs queued yet.</Empty>
+              ) : !dense ? (
+                /* One card per run. Reads far better than a table at the sizes a
+                   free-tier matrix actually runs at, and it makes the thing being
+                   compared — the stack — the visible unit. */
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))',
+                    gap: space[3],
+                  }}
+                >
+                  {state.runs.map((r) => {
+                    const on = selected === r.run_id
+                    const live = ['RUNNING', 'PREPARING', 'EVALUATING'].includes(r.state)
+                    return (
+                      <StackCard
+                        key={r.run_id}
+                        selected={on}
+                        onClick={() => setSelected(on ? null : r.run_id)}
+                        ariaLabel={`${on ? 'close' : 'inspect'} ${r.harness} × ${r.model_id}`}
+                        harness={r.harness}
+                        model={r.model_id.replace(/:free$/, '')}
+                        status={
+                          <Status tone={stateTone(r.state)} pulse={live}>
+                            {r.state.toLowerCase()}
+                          </Status>
+                        }
+                        footer={
+                          <>
+                            <span style={{ ...type.caption, color: color.faint }}>
+                              {r.model_requests ?? 0} call
+                              {r.model_requests === 1 ? '' : 's'} · {fmtSeconds(r.elapsed_s)}
+                            </span>
+                            <span
+                              style={{
+                                ...type.caption,
+                                color:
+                                  r.score !== null && r.score !== undefined
+                                    ? color.pass
+                                    : color.faint,
+                              }}
+                            >
+                              {r.score === null || r.score === undefined
+                                ? r.budget_exhausted
+                                  ? 'budget spent'
+                                  : '—'
+                                : r.score.toFixed(3)}
+                            </span>
+                          </>
+                        }
+                      />
+                    )
+                  })}
+                </div>
               ) : (
                 <ScrollX>
                   <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 700 }}>
@@ -266,7 +345,7 @@ export default function Live() {
                 </ScrollX>
               )}
               <div style={{ ...type.caption, color: color.faint, marginTop: space[3] }}>
-                select a row to inspect that run
+                select a run to inspect it
               </div>
             </Panel>
 
@@ -329,7 +408,7 @@ export default function Live() {
         </>
       )}
 
-      {tab === 'Comparison' && <Results experimentId={id!} />}
+      {onResults && <Results experimentId={id!} experimentName={meta.data?.name} />}
     </div>
   )
 }

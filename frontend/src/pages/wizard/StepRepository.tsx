@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../../api'
 import { color, space } from '../../design/tokens'
 import { measure, type } from '../../design/typography'
-import { Button, Field, Metric, Notice, Panel, Row, Segmented, Status } from '../../ui'
+import { Button, Field, Notice, Panel, ScreenTitle, Segmented, StepItem, Steps } from '../../ui'
 import type { Wizard } from './useWizard'
 
 /**
@@ -21,8 +21,73 @@ export default function StepRepository({ w }: { w: Wizard }) {
     retry: false,
   })
 
+  const a = w.analysis
   return (
-    <Panel label="Repository">
+    <>
+      <ScreenTitle
+        ask="Can this repository be benchmarked?"
+        title={a ? (w.pathOrUrl.replace(/\/+$/, '').split('/').pop() ?? 'Repository') : 'Point it at a repository'}
+        lede="Languages, package managers and test commands are detected automatically, and a clean baseline runs in the background while you pick tasks."
+      />
+
+      {/* What the analyzer found, as a ladder rather than a row of figures:
+          the question is whether this repo can be scored at all, and that is a
+          sequence of things holding or not holding. */}
+      {a && (
+        <Panel label="Detected">
+          <Steps>
+            <StepItem state={a.languages?.length ? 'done' : 'failed'}>
+              {a.languages?.length ? `${a.languages.join(', ')} · ${a.package_managers?.join(', ') || 'no package manager'}` : 'No language detected'}
+            </StepItem>
+            <StepItem state={a.test_locations?.length ? 'done' : 'failed'}>
+              {a.test_locations?.length
+                ? `Tests found in ${a.test_locations.join(', ')}`
+                : 'No test directory found — comprehension tasks still work'}
+            </StepItem>
+            <StepItem state={a.commands?.test ? 'done' : 'failed'}>
+              {a.commands?.test
+                ? `Test command: ${a.commands.test}`
+                : 'No test command detected — you can enter one on Review'}
+            </StepItem>
+            <StepItem
+              state={
+                w.runBaseline.isPending
+                  ? 'doing'
+                  : w.baselineBroken
+                    ? 'failed'
+                    : w.baseline
+                      ? 'done'
+                      : 'todo'
+              }
+            >
+              {w.baselineLabel}
+              {w.baseline ? ` · ${w.baseline.test_case_count} test cases` : ''}
+            </StepItem>
+            {previous.data && !w.baseline && (
+              <StepItem state="done">
+                Benchmarked before · {previous.data.test_case_count} test cases on the last baseline
+              </StepItem>
+            )}
+          </Steps>
+
+          {a.supported === false && (
+            <div style={{ marginTop: space[4] }}>
+              <Notice tone="warn">
+                This language or toolchain is not fully supported. You can continue, but detection
+                will be thinner and you may have to enter the test command yourself.
+              </Notice>
+            </div>
+          )}
+
+          <div style={{ marginTop: space[5] }}>
+            <Button variant="primary" onClick={() => w.setStep(1)}>
+              Continue
+            </Button>
+          </div>
+        </Panel>
+      )}
+
+      <Panel label={a ? 'Analyse a different repository' : 'Repository'}>
       <div style={{ marginBottom: space[4] }}>
         <Segmented
           value={w.source}
@@ -46,9 +111,8 @@ export default function StepRepository({ w }: { w: Wizard }) {
       </div>
 
       <p style={{ ...type.bodySm, color: color.faint, maxWidth: measure, marginBottom: space[4] }}>
-        That is all that is needed to start. Languages, package managers and test commands are
-        detected automatically, and a clean baseline runs in the background while you pick tasks —
-        you can review and correct all of it on the last step.
+        A local path or a public GitHub URL. Everything else is detected, and you can review and
+        correct all of it on the last step.
       </p>
 
       <Button
@@ -58,40 +122,7 @@ export default function StepRepository({ w }: { w: Wizard }) {
       >
         {w.addRepo.isPending ? 'Analyzing…' : 'Analyze repository'}
       </Button>
-
-      {w.analysis && (
-        <div style={{ marginTop: space[5] }}>
-          <Row gap={space[5]} style={{ alignItems: 'flex-start' }}>
-            <Metric label="language" value={w.analysis.languages?.[0] ?? 'unknown'} />
-            <Metric label="package manager" value={w.analysis.package_managers?.[0] ?? '—'} />
-            <Metric
-              label="size"
-              value={(w.analysis.size_bytes / 1_000_000).toFixed(1)}
-              unit="MB"
-            />
-            <Metric label="test locations" value={w.analysis.test_locations?.length ?? 0} />
-          </Row>
-
-          {/* A previous baseline means this repo has been benchmarked before —
-              worth saying, because it avoids a needless container run. */}
-          {previous.data && (
-            <div style={{ marginTop: space[4] }}>
-              <Status tone={previous.data.benchmarkable === false ? 'warn' : 'pass'}>
-                previous baseline · {previous.data.test_case_count} tests
-              </Status>
-            </div>
-          )}
-
-          {w.analysis.supported === false && (
-            <div style={{ marginTop: space[4] }}>
-              <Notice tone="warn">
-                This language or toolchain is not fully supported. You can continue, but detection
-                will be thinner and you may have to enter the test command yourself.
-              </Notice>
-            </div>
-          )}
-        </div>
-      )}
-    </Panel>
+      </Panel>
+    </>
   )
 }

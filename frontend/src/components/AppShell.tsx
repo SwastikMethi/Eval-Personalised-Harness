@@ -1,20 +1,15 @@
 import { useQuery } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
-import { Link, useLocation } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { api } from '../api'
-import { color, radius, space } from '../design/tokens'
+import { color, space } from '../design/tokens'
 import { font, type } from '../design/typography'
 import { UIStyles } from '../ui'
-
-const NAV = [
-  { to: '/', label: 'Overview' },
-  { to: '/new', label: 'New run' },
-]
+import { useStages } from '../stages'
 
 /**
- * A reachability light. `title` is a real tooltip via the native attribute
- * rather than MUI's — it needs no JS, works on keyboard focus, and one less
- * component is one less thing to port.
+ * A reachability light. `title` is a real tooltip via the native attribute —
+ * it needs no JS, works on keyboard focus, and is one less component to own.
  */
 function Dot({ ok, title }: { ok: boolean | undefined; title: string }) {
   const c = ok === undefined ? color.faint : ok ? color.pass : color.fail
@@ -34,8 +29,20 @@ function Dot({ ok, title }: { ok: boolean | undefined; title: string }) {
   )
 }
 
+/**
+ * The workflow spine.
+ *
+ * A benchmark is a sequence — you cannot pick stacks before you have a repo,
+ * or read results before anything has run — and the rail makes that sequence
+ * the permanent frame rather than something you infer from the URL. Overview
+ * sits above the six stages, separated by a rule, because it is a destination
+ * rather than a step.
+ */
 export default function AppShell({ children }: { children: ReactNode }) {
   const { pathname } = useLocation()
+  const navigate = useNavigate()
+  const { stages } = useStages()
+
   const health = useQuery({ queryKey: ['health'], queryFn: api.health, retry: 1 })
   // Provider reachability is worth surfacing permanently: without it every run
   // fails, and the cause is not obvious from a run's error message.
@@ -48,63 +55,57 @@ export default function AppShell({ children }: { children: ReactNode }) {
     staleTime: 60_000,
   })
 
+  const onOverview = pathname === '/'
+
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+    <div
+      className="aso-lab"
+      style={{ display: 'grid', gridTemplateColumns: '236px minmax(0, 1fr)', minHeight: '100vh' }}
+    >
       <UIStyles />
 
-      <header
+      <nav
+        className="aso-rail"
+        aria-label="Workflow"
         style={{
-          borderBottom: `1px solid ${color.line}`,
-          background: 'rgba(10,11,13,.86)',
-          backdropFilter: 'blur(8px)',
+          borderRight: `1px solid ${color.line}`,
+          background: color.surface,
+          padding: `${space[6]}px 0`,
           position: 'sticky',
           top: 0,
-          zIndex: 10,
+          height: '100vh',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: space[5],
         }}
       >
-        <div
-          style={{
-            maxWidth: 1400,
-            margin: '0 auto',
-            padding: `${space[3]}px ${space[5]}px`,
-            display: 'flex',
-            alignItems: 'center',
-            gap: space[5],
-          }}
-        >
-          <Link to="/" style={{ display: 'flex', alignItems: 'baseline', gap: space[2] }}>
-            <span style={{ ...type.subheading, color: color.text }}>Agent Stack Optimizer</span>
-            <span style={{ ...type.label, color: color.faint }}>local</span>
-          </Link>
+        <div style={{ padding: `0 ${space[5]}px` }}>
+          <h1 style={{ ...type.subheading, fontSize: 19, fontWeight: 400, margin: 0 }}>
+            Agent Stack Optimizer
+          </h1>
+          <p style={{ ...type.label, color: color.faint, margin: '2px 0 0' }}>local</p>
+        </div>
 
-          <nav style={{ display: 'flex', gap: space[1] }}>
-            {NAV.map((item) => {
-              const active = item.to === '/' ? pathname === '/' : pathname.startsWith(item.to)
-              return (
-                <Link
-                  key={item.to}
-                  to={item.to}
-                  className="aso-focusable"
-                  aria-current={active ? 'page' : undefined}
-                  style={{
-                    fontFamily: font.sans,
-                    fontSize: 13,
-                    fontWeight: 500,
-                    padding: `5px ${space[3]}px`,
-                    borderRadius: radius.sm,
-                    color: active ? color.text : color.dim,
-                    background: active ? color.raised : 'transparent',
-                  }}
-                >
-                  {item.label}
-                </Link>
-              )
-            })}
-          </nav>
+        <div className="aso-stages" style={{ display: 'flex', flexDirection: 'column' }}>
+          <Stage
+            label="Overview"
+            state={onOverview ? 'current' : 'available'}
+            onClick={() => navigate('/')}
+          />
+          <div
+            className="aso-rail-sep"
+            style={{
+              borderTop: `1px solid ${color.lineSoft}`,
+              margin: `${space[2]}px ${space[5]}px`,
+            }}
+          />
+          {stages.map((s) => (
+            <Stage key={s.label} label={s.label} state={s.state} onClick={s.go} />
+          ))}
+        </div>
 
-          <div style={{ flexGrow: 1 }} />
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: space[3] }}>
+        <div style={{ marginTop: 'auto', padding: `0 ${space[5]}px`, display: 'grid', gap: space[3] }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: space[2], flexWrap: 'wrap' }}>
             <Dot
               ok={health.isSuccess ? true : health.isError ? false : undefined}
               title={
@@ -122,36 +123,80 @@ export default function AppShell({ children }: { children: ReactNode }) {
             />
             <span style={{ ...type.caption, color: color.faint }}>openrouter</span>
           </div>
+          <p
+            style={{
+              fontFamily: font.mono,
+              fontSize: 10,
+              lineHeight: 1.6,
+              color: color.faint,
+              borderTop: `1px solid ${color.lineSoft}`,
+              paddingTop: space[3],
+              margin: 0,
+            }}
+          >
+            Local Docker sandboxing suits trusted testing — it is not hardened isolation. Do not
+            point this at repositories you would not run on your machine.
+          </p>
         </div>
-      </header>
+      </nav>
 
       <main
-        style={{
-          maxWidth: 1400,
-          width: '100%',
-          margin: '0 auto',
-          padding: `${space[6]}px ${space[5]}px`,
-          flexGrow: 1,
-        }}
+        className="aso-screens"
+        style={{ padding: `${space[7]}px ${space[7]}px ${space[8]}px`, maxWidth: 1180, width: '100%' }}
       >
         {children}
       </main>
-
-      <footer
-        style={{
-          borderTop: `1px solid ${color.lineSoft}`,
-          padding: `${space[4]}px ${space[5]}px`,
-          marginTop: space[6],
-        }}
-      >
-        <div style={{ maxWidth: 1400, margin: '0 auto' }}>
-          <p style={{ ...type.caption, color: color.faint }}>
-            Local Docker sandboxing is appropriate for trusted testing — it is not hardened
-            multi-tenant isolation. Do not point this at repositories you would not run on your
-            machine.
-          </p>
-        </div>
-      </footer>
     </div>
+  )
+}
+
+function Stage({
+  label,
+  state,
+  onClick,
+}: {
+  label: string
+  state: 'done' | 'current' | 'available' | 'locked'
+  onClick?: () => void
+}) {
+  const locked = state === 'locked'
+  const current = state === 'current'
+  const dotBg = current ? color.live : state === 'done' ? color.pass : color.line
+  return (
+    <button
+      type="button"
+      className="aso-stage aso-inset-focus"
+      aria-current={current ? 'page' : undefined}
+      disabled={locked || !onClick}
+      onClick={onClick}
+      style={{
+        display: 'grid',
+        gridTemplateColumns: '26px 1fr',
+        alignItems: 'center',
+        gap: space[2],
+        padding: `9px ${space[5]}px`,
+        border: 0,
+        width: '100%',
+        textAlign: 'left',
+        background: current ? color.raised : 'none',
+        color: current ? color.text : state === 'done' ? color.dim : color.faint,
+        fontFamily: font.sans,
+        fontSize: 13,
+        cursor: locked || !onClick ? 'default' : 'pointer',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      <span
+        style={{
+          width: 7,
+          height: 7,
+          borderRadius: '50%',
+          marginLeft: 5,
+          background: dotBg,
+          boxShadow: current ? '0 0 0 3px rgba(76,201,232,.16)' : undefined,
+        }}
+      />
+      {label}
+    </button>
   )
 }

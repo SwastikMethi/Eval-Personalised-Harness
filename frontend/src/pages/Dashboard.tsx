@@ -4,8 +4,8 @@ import { Link } from 'react-router-dom'
 import { api } from '../api'
 import { color, radius, space } from '../design/tokens'
 import { rise, respectMotion, stagger } from '../design/motion'
-import { font, measure, type } from '../design/typography'
-import { Empty, Notice, Panel, Status } from '../ui'
+import { font, type } from '../design/typography'
+import { Empty, Notice, Panel, ScreenTitle, Status } from '../ui'
 
 export default function Dashboard() {
   const health = useQuery({ queryKey: ['health'], queryFn: api.health, retry: 1 })
@@ -14,45 +14,29 @@ export default function Dashboard() {
 
   return (
     <div>
-      <motion.header
-        variants={respectMotion(rise)}
-        initial="hidden"
-        animate="shown"
-        style={{
-          display: 'flex',
-          alignItems: 'flex-end',
-          justifyContent: 'space-between',
-          gap: space[5],
-          flexWrap: 'wrap',
-          marginBottom: space[6],
-        }}
-      >
-        <div>
-          <h1 style={{ ...type.title, fontWeight: 400, marginBottom: space[3] }}>
-            Which stack is best for your repo?
-          </h1>
-          <p style={{ ...type.body, color: color.dim, maxWidth: measure }}>
-            Benchmark coding-agent harnesses against open-weight models on tasks from your own
-            repository, and get quality, reliability and efficiency recommendations.
-          </p>
-        </div>
-        <Link
-          to="/new"
-          className="aso-focusable"
-          style={{
-            fontFamily: font.sans,
-            fontSize: 13,
-            fontWeight: 600,
-            padding: '10px 20px',
-            borderRadius: radius.md,
-            background: color.live,
-            color: color.onLive,
-            whiteSpace: 'nowrap',
-          }}
-        >
-          New run
-        </Link>
-      </motion.header>
+      <ScreenTitle
+        ask="Which stack is best for your repo?"
+        title="Agent Stack Optimizer"
+        lede="Benchmark coding-agent harnesses against open-weight models on tasks from your own repository, and get quality, reliability and efficiency recommendations."
+        action={
+          <Link
+            to="/new"
+            className="aso-focusable"
+            style={{
+              fontFamily: font.sans,
+              fontSize: 13,
+              fontWeight: 600,
+              padding: '10px 20px',
+              borderRadius: radius.md,
+              background: color.live,
+              color: color.onLive,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            New run
+          </Link>
+        }
+      />
 
       {health.isError && (
         <Notice tone="warn">

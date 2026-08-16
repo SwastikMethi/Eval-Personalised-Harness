@@ -1,4 +1,5 @@
-import { screen } from '@testing-library/react'
+import { screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import Results from './Results'
 import { renderScreen } from '../test/render'
@@ -60,19 +61,29 @@ describe('Results', () => {
     expect(await screen.findByText(/No results yet/)).toBeInTheDocument()
   })
 
-  it('shows the winning combination and why it won', async () => {
+  it('leads with the winning combination and why it won', async () => {
     serve(payload())
     renderScreen(<Results experimentId="e1" />)
-    expect(await screen.findByText('Best balanced')).toBeInTheDocument()
-    expect(await screen.findByText('highest weighted score')).toBeInTheDocument()
+
+    // Scoped to the hero: the point is that the answer is stated up front, not
+    // merely present somewhere in the table further down the page.
+    const hero = await screen.findByRole('group', { name: 'Best balanced' })
+    expect(within(hero).getByText(/mini-swe-agent × openai\/gpt-oss-20b/)).toBeInTheDocument()
+    expect(within(hero).getByText('0.90')).toBeInTheDocument()
+    expect(within(hero).getByText('highest weighted score')).toBeInTheDocument()
   })
 
-  it('names a card as having no winner rather than inventing one', async () => {
+  it('says there is no winner rather than inventing one, on every dimension', async () => {
     serve(payload({ recommendations: {} }))
+    const user = userEvent.setup()
     renderScreen(<Results experimentId="e1" />)
-    // All four cards must still render, each stating there is no winner.
-    expect(await screen.findByText('Best quality')).toBeInTheDocument()
-    expect((await screen.findAllByText('No eligible combination.')).length).toBe(4)
+
+    // One dimension shows at a time now, so each is checked in turn — the
+    // guarantee is unchanged: no dimension ever names a stack it cannot back.
+    for (const dim of ['Best balanced', 'Best quality', 'Best reliability', 'Best efficiency']) {
+      await user.click(await screen.findByRole('tab', { name: dim }))
+      expect(await screen.findByText('No eligible combination')).toBeInTheDocument()
+    }
   })
 
   it('flags a statistically weak recommendation', async () => {

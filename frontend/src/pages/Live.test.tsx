@@ -71,12 +71,12 @@ describe('Live', () => {
     const user = userEvent.setup()
     renderScreen(<Live />, '/experiments/e1', '/experiments/:id')
 
-    await user.click(await screen.findByRole('button', { name: 'inspect' }))
+    await user.click(await screen.findByRole('button', { name: /inspect mini-swe-agent/ }))
 
     // The run's own detail appears…
     expect(await screen.findByText('Fix median()')).toBeInTheDocument()
     // …and the matrix is still on screen, which is the point of merging them.
-    expect(screen.getByText('Runs')).toBeInTheDocument()
+    expect(screen.getByText(/^Runs · /)).toBeInTheDocument()
   })
 
   it('offers to cancel a running run — the UI could previously only start work', async () => {
@@ -84,7 +84,7 @@ describe('Live', () => {
     const user = userEvent.setup()
     renderScreen(<Live />, '/experiments/e1', '/experiments/:id')
 
-    await user.click(await screen.findByRole('button', { name: 'inspect' }))
+    await user.click(await screen.findByRole('button', { name: /inspect mini-swe-agent/ }))
     expect(await screen.findByRole('button', { name: /Cancel run/ })).toBeInTheDocument()
   })
 
@@ -106,9 +106,34 @@ describe('Live', () => {
     const user = userEvent.setup()
     renderScreen(<Live />, '/experiments/e1', '/experiments/:id')
 
-    await user.click(await screen.findByRole('button', { name: 'inspect' }))
+    await user.click(await screen.findByRole('button', { name: /inspect mini-swe-agent/ }))
     expect(await screen.findByText('Fix median()')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Cancel run/ })).not.toBeInTheDocument()
+  })
+
+  it('switches from cards to the table once the matrix outgrows a card grid', async () => {
+    // 13 runs: cards read well at six and become a scroll at thirty-six, so the
+    // screen picks for you rather than making a large matrix unusable.
+    const many = Array.from({ length: 13 }, (_, i) => ({
+      ...RUN,
+      run_id: `run-${i}`,
+      repetition: i + 1,
+    }))
+    server.use(
+      http.get('/api/v1/experiments/:id', () => HttpResponse.json({ id: 'e1', name: 'big' })),
+      http.get('/api/v1/experiments/:id/progress', () =>
+        HttpResponse.json({ done: 0, total: 13, finished: false, runs: many }),
+      ),
+    )
+    const user = userEvent.setup()
+    renderScreen(<Live />, '/experiments/e1', '/experiments/:id')
+
+    expect(await screen.findByRole('table')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /inspect mini-swe-agent/ })).not.toBeInTheDocument()
+
+    // …and the choice is still the reader's to override.
+    await user.click(screen.getByRole('button', { name: 'Cards' }))
+    expect((await screen.findAllByRole('button', { name: /inspect mini-swe-agent/ })).length).toBe(13)
   })
 
   it('says a run produced no patch rather than showing an empty box', async () => {
@@ -116,7 +141,7 @@ describe('Live', () => {
     const user = userEvent.setup()
     renderScreen(<Live />, '/experiments/e1', '/experiments/:id')
 
-    await user.click(await screen.findByRole('button', { name: 'inspect' }))
+    await user.click(await screen.findByRole('button', { name: /inspect mini-swe-agent/ }))
     expect(await screen.findByText(/No patch produced/)).toBeInTheDocument()
   })
 })

@@ -5,7 +5,19 @@ import type { JudgeVerdict } from '../api'
 import { color, space, stateTone } from '../design/tokens'
 import { respectMotion, rise } from '../design/motion'
 import { font, type } from '../design/typography'
-import { Button, Empty, Metric, Notice, Panel, Row, ScrollX, Status, Tabs } from '../ui'
+import {
+  Button,
+  Criterion,
+  Empty,
+  Metric,
+  Notice,
+  Panel,
+  Row,
+  Rubric,
+  ScrollX,
+  Status,
+  Tabs,
+} from '../ui'
 import { useState } from 'react'
 
 /**
@@ -219,21 +231,26 @@ export default function RunPanel({ runId }: { runId: string }) {
                   <p style={{ ...type.bodySm, color: color.dim, marginBottom: space[3] }}>
                     {judge.rationale || 'graded against the task rubric'}
                   </p>
-                  {(judge.met ?? []).map((c: string) => (
-                    <div key={c} style={{ ...type.bodySm, color: color.pass, marginBottom: 2 }}>
-                      ✓ {c}
-                    </div>
-                  ))}
-                  {(judge.partial ?? []).map((c: string) => (
-                    <div key={c} style={{ ...type.bodySm, color: color.live, marginBottom: 2 }}>
-                      ~ {c}
-                    </div>
-                  ))}
-                  {(judge.missing ?? []).map((c: string) => (
-                    <div key={c} style={{ ...type.bodySm, color: color.warn, marginBottom: 2 }}>
-                      ✗ {c}
-                    </div>
-                  ))}
+                  {/* Same grid the rubric was written in, now carrying the
+                      verdict column — so a score can be read against the exact
+                      list it was graded on rather than three loose lists. */}
+                  <Rubric>
+                    {(judge.met ?? []).map((c: string) => (
+                      <Criterion key={c} verdict="met">
+                        {c}
+                      </Criterion>
+                    ))}
+                    {(judge.partial ?? []).map((c: string) => (
+                      <Criterion key={c} verdict="partial">
+                        {c}
+                      </Criterion>
+                    ))}
+                    {(judge.missing ?? []).map((c: string) => (
+                      <Criterion key={c} verdict="missed">
+                        {c}
+                      </Criterion>
+                    ))}
+                  </Rubric>
                   {(judge.invented ?? []).length > 0 && (
                     <Notice tone="warn">
                       Named things that do not exist in this repository:{' '}

@@ -4,11 +4,14 @@ import { measure, font, type } from '../../design/typography'
 import {
   Button,
   Check,
+  Criterion,
   Empty,
   Field,
   Notice,
   Panel,
   Row,
+  Rubric,
+  ScreenTitle,
   Segmented,
   Status,
   TextArea,
@@ -23,16 +26,27 @@ import type { Wizard } from './useWizard'
  * is the only mode that works on a repo whose own tests cannot fail.
  */
 export default function StepTasks({ w }: { w: Wizard }) {
+  const proposedCount = w.proposed.length
   return (
-    <div
-      style={{
-        display: 'grid',
-        gridTemplateColumns: 'minmax(0, 1.4fr) minmax(280px, 1fr)',
-        gap: space[4],
-        alignItems: 'start',
-      }}
-    >
-      <Panel label="What should the agents attempt?">
+    <>
+      <ScreenTitle
+        ask="What should the agents attempt?"
+        title={
+          proposedCount > 0 && w.taskMode === 'comprehension'
+            ? `${proposedCount} question${proposedCount === 1 ? '' : 's'} proposed`
+            : 'Choose the tasks'
+        }
+        lede="Replaying a commit is the strongest signal, because the real tests shipped with it. Comprehension is the only mode that works on a repo whose own tests cannot fail."
+      />
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(0, 1.4fr) minmax(280px, 1fr)',
+          gap: space[4],
+          alignItems: 'start',
+        }}
+      >
+      <Panel label="Task source">
         <div style={{ marginBottom: space[4] }}>
           <Segmented
             value={w.taskMode}
@@ -85,26 +99,19 @@ export default function StepTasks({ w }: { w: Wizard }) {
                   }
                   hint={`${t.category.replace('_', ' ')} · graded on ${t.rubric.length} criteria`}
                 />
-                <div style={{ paddingLeft: 26 }}>
-                  {t.rubric.map((c, i) => (
-                    <div
-                      key={i}
-                      style={{ ...type.bodySm, fontSize: 12.5, color: color.dim, marginBottom: 2 }}
-                    >
-                      <span
-                        style={{
-                          ...type.caption,
-                          color: c.depth === 'deep' ? color.warn : color.faint,
-                        }}
-                      >
-                        {(c.depth ?? 'deep').slice(0, 4)}
-                      </span>{' '}
-                      {c.criterion}{' '}
-                      <span style={{ ...type.caption, color: color.faint }}>[{c.evidence}]</span>
-                    </div>
-                  ))}
+                {/* The rubric as a graded grid, not a paragraph. Depth is
+                    colour-coded because six deep criteria grade very
+                    differently from six structural ones — invisible as text. */}
+                <div style={{ paddingLeft: 26, marginTop: space[2] }}>
+                  <Rubric>
+                    {t.rubric.map((c, i) => (
+                      <Criterion key={i} depth={c.depth} evidence={c.evidence}>
+                        {c.criterion}
+                      </Criterion>
+                    ))}
+                  </Rubric>
                   {t.dropped.length > 0 && (
-                    <div style={{ ...type.caption, color: color.warn, marginTop: 4 }}>
+                    <div style={{ ...type.caption, color: color.warn, marginTop: space[2] }}>
                       {t.dropped.length} criterion/criteria dropped — cited paths that do not exist
                       in this repo
                     </div>
@@ -320,5 +327,6 @@ export default function StepTasks({ w }: { w: Wizard }) {
         )}
       </Panel>
     </div>
+    </>
   )
 }

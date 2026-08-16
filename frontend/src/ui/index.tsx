@@ -15,7 +15,10 @@ import { useEffect, useId, useRef } from 'react'
 
 import { color, elevation, radius, space, tint } from '../design/tokens'
 import { font, type } from '../design/typography'
-import { beat, respectMotion, rise, transition } from '../design/motion'
+import { beat, duration, ease, respectMotion, rise, transition } from '../design/motion'
+
+/** The shared easing, in the form a stylesheet can use. */
+const easeCss = `cubic-bezier(${ease.join(',')})`
 
 type Tone = 'live' | 'pass' | 'fail' | 'warn' | 'idle'
 
@@ -54,15 +57,55 @@ const focusCss = `
   }
 `
 
-/** Injected once. Pseudo-classes cannot be expressed as inline styles. */
+/**
+ * Injected once by AppShell. Everything here is a pseudo-class, pseudo-element
+ * or media query — none of which an inline style can express, which is the only
+ * reason this file contains a stylesheet at all.
+ */
 export function UIStyles() {
   return (
     <style>{`
       ${focusCss}
       .aso-hover-line:hover { border-color: ${color.faint}; }
       .aso-scroll-x { overflow-x: auto; }
+
+      /* Rail stage: the 2px cyan edge marking where you are. */
+      .aso-stage { position: relative; }
+      .aso-stage:hover { color: ${color.dim}; background: ${color.raised}; }
+      .aso-stage[aria-current="page"]::before {
+        content: ""; position: absolute; left: 0; top: 6px; bottom: 6px;
+        width: 2px; background: ${color.live};
+      }
+
+      /* A card lifts to say it is selectable — the cue a checkbox list lacked. */
+      .aso-card { transition: border-color ${duration.base}s ${easeCss}, transform ${duration.base}s ${easeCss}; }
+      .aso-card:hover { border-color: ${color.faint}; transform: translateY(-1px); }
+      .aso-add:hover { border-color: ${color.live}; color: ${color.live}; }
+
+      /* The input glows on focus rather than merely changing border colour. */
+      .aso-field:focus-within { border-color: ${color.live}; box-shadow: ${elevation.glow}; }
+
+      .aso-bar-fill { transform-origin: left; }
+
       @media (prefers-reduced-motion: reduce) {
-        *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+        *, *::before, *::after {
+          animation-duration: .001ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: .001ms !important;
+        }
+        .aso-card:hover { transform: none; }
+      }
+
+      /* The rail becomes a horizontal strip rather than eating a narrow screen. */
+      @media (max-width: 960px) {
+        .aso-lab { grid-template-columns: 1fr !important; }
+        .aso-rail { position: static !important; height: auto !important; }
+        .aso-stages { flex-direction: row !important; overflow-x: auto; }
+        .aso-stage[aria-current="page"]::before { display: none; }
+        /* A horizontal rule between Overview and the stages becomes a wide
+           empty gap once the rail is laid out as a row. */
+        .aso-rail-sep { display: none; }
+        .aso-screens { padding: ${space[5]}px !important; }
       }
     `}</style>
   )
@@ -105,6 +148,423 @@ export function Mono({
     >
       {children}
     </span>
+  )
+}
+
+/* ── Ask ───────────────────────────────────────────────────────────────── */
+
+/**
+ * The question a screen exists to answer, above its title.
+ *
+ * This is the spine of the whole design: every screen is named by the decision
+ * it helps you make ("Which stack should I use?"), not by the data it holds.
+ * It is the cheapest way to stop the product reading like a backend viewer.
+ */
+export function Ask({ children }: { children: ReactNode }) {
+  return (
+    <p style={{ ...type.label, letterSpacing: '.14em', color: color.live, margin: `0 0 ${space[3]}px` }}>
+      {children}
+    </p>
+  )
+}
+
+/** Screen title + optional lede, so every screen opens identically. */
+export function ScreenTitle({
+  ask,
+  title,
+  lede,
+  action,
+}: {
+  ask: string
+  title: ReactNode
+  lede?: ReactNode
+  action?: ReactNode
+}) {
+  return (
+    <motion.header
+      variants={respectMotion(rise)}
+      initial="hidden"
+      animate="shown"
+      style={{ marginBottom: space[5] }}
+    >
+      <Ask>{ask}</Ask>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'flex-end',
+          gap: space[5],
+          flexWrap: 'wrap',
+        }}
+      >
+        <h2
+          style={{
+            ...type.title,
+            fontWeight: 400,
+            margin: 0,
+            textWrap: 'balance',
+          }}
+        >
+          {title}
+        </h2>
+        {action}
+      </div>
+      {lede && (
+        <p style={{ ...type.body, color: color.dim, maxWidth: '64ch', margin: `${space[2]}px 0 0` }}>
+          {lede}
+        </p>
+      )}
+    </motion.header>
+  )
+}
+
+/* ── Hero ──────────────────────────────────────────────────────────────── */
+
+/**
+ * The answer, before any chart.
+ *
+ * Results used to open with four equally-weighted cards, which made the reader
+ * do the ranking the tool exists to do. One recommendation, one large number,
+ * everything else subordinate to it.
+ */
+export function Hero({
+  label,
+  name,
+  score,
+  detail,
+  note,
+  composition,
+  muted,
+  children,
+}: {
+  label: string
+  name?: ReactNode
+  score?: ReactNode
+  detail?: ReactNode
+  note?: ReactNode
+  composition?: Tone[]
+  /** No winner: drops the cyan edge and glow so it cannot read as a result. */
+  muted?: boolean
+  children?: ReactNode
+}) {
+  return (
+    <motion.div
+      // A labelled region: it is the page's headline answer, so it should be
+      // reachable as one thing by a screen reader rather than loose text.
+      role="group"
+      aria-label={label}
+      variants={respectMotion(rise)}
+      initial="hidden"
+      animate="shown"
+      style={{
+        border: `1px solid ${muted ? color.line : tint.liveEdge}`,
+        borderRadius: radius.md,
+        background: muted
+          ? color.surface
+          : `linear-gradient(160deg, rgba(76,201,232,.07), transparent 62%), ${color.surface}`,
+        padding: space[6],
+        marginBottom: space[4],
+      }}
+    >
+      <span style={{ ...type.label, color: muted ? color.faint : color.live }}>{label}</span>
+      {name && (
+        <div
+          style={{
+            fontFamily: font.mono,
+            fontSize: 18,
+            margin: `${space[2]}px 0 ${space[4]}px`,
+            overflowWrap: 'anywhere',
+          }}
+        >
+          {name}
+        </div>
+      )}
+      {(score !== undefined || detail) && (
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: space[4], flexWrap: 'wrap' }}>
+          {score !== undefined && (
+            <span style={{ ...type.display, fontVariantNumeric: 'tabular-nums' }}>{score}</span>
+          )}
+          <div>
+            {detail && (
+              <div style={{ fontFamily: font.mono, fontSize: 13, color: color.dim }}>{detail}</div>
+            )}
+            {note && <div style={{ ...type.caption, color: color.faint }}>{note}</div>}
+          </div>
+        </div>
+      )}
+      {composition && composition.length > 0 && <Composition tones={composition} />}
+      {children}
+    </motion.div>
+  )
+}
+
+/** One stripe per criterion — the shape of a score, not just its value. */
+export function Composition({ tones }: { tones: Tone[] }) {
+  return (
+    <div aria-hidden style={{ display: 'flex', gap: 3, marginTop: space[4] }}>
+      {tones.map((t, i) => (
+        <span
+          key={i}
+          style={{ height: 5, borderRadius: radius.pill, flex: 1, background: toneColor[t] }}
+        />
+      ))}
+    </div>
+  )
+}
+
+/* ── StackCard ─────────────────────────────────────────────────────────── */
+
+/**
+ * One harness × model pairing. Used to choose stacks and, on Live, to select a
+ * run — the same object in both places, so it looks like the same thing.
+ */
+export function StackCard({
+  harness,
+  model,
+  status,
+  footer,
+  selected,
+  onClick,
+  ariaLabel,
+}: {
+  harness: ReactNode
+  model?: ReactNode
+  status?: ReactNode
+  footer?: ReactNode
+  selected?: boolean
+  onClick?: () => void
+  ariaLabel?: string
+}) {
+  const body = (
+    <>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: space[2],
+        }}
+      >
+        <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{harness}</span>
+        {status}
+      </div>
+      {model !== undefined && (
+        <span
+          style={{
+            fontFamily: font.mono,
+            fontSize: 12.5,
+            color: color.dim,
+            wordBreak: 'break-all',
+          }}
+        >
+          {model}
+        </span>
+      )}
+      {footer && (
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: space[2],
+            marginTop: 6,
+          }}
+        >
+          {footer}
+        </div>
+      )}
+    </>
+  )
+
+  const style: CSSProperties = {
+    ...focusRing,
+    border: `1px solid ${selected ? 'rgba(76,201,232,.45)' : color.line}`,
+    borderRadius: radius.md,
+    background: color.surface,
+    boxShadow: selected ? elevation.glow : undefined,
+    padding: space[4],
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+    textAlign: 'left',
+    font: 'inherit',
+    color: 'inherit',
+    width: '100%',
+  }
+
+  if (!onClick) return <div style={style}>{body}</div>
+  return (
+    <button
+      type="button"
+      className="aso-card aso-focusable"
+      aria-pressed={selected}
+      aria-label={ariaLabel}
+      onClick={onClick}
+      style={{ ...style, cursor: 'pointer' }}
+    >
+      {body}
+    </button>
+  )
+}
+
+/** The dashed affordance that adds another stack. */
+export function AddCard({ children, onClick }: { children: ReactNode; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className="aso-add aso-focusable"
+      onClick={onClick}
+      style={{
+        ...focusRing,
+        border: `1px dashed ${color.line}`,
+        borderRadius: radius.md,
+        background: 'none',
+        color: color.dim,
+        padding: space[4],
+        minHeight: 104,
+        cursor: 'pointer',
+        fontFamily: font.sans,
+        fontSize: 13,
+        transition: `border-color ${duration.base}s, color ${duration.base}s`,
+      }}
+    >
+      {children}
+    </button>
+  )
+}
+
+/* ── Rubric ────────────────────────────────────────────────────────────── */
+
+/**
+ * Depth · criterion + evidence · verdict.
+ *
+ * Depth is colour-coded because a rubric of six "deep" criteria grades very
+ * differently from six structural ones, and that was invisible as running text.
+ */
+const depthColor: Record<string, string> = {
+  structural: '#6E7B85',
+  behavioural: '#7E8B72',
+  deep: color.warn,
+}
+
+export function Rubric({ children }: { children: ReactNode }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 1,
+        background: color.lineSoft,
+        borderRadius: radius.md,
+        overflow: 'hidden',
+      }}
+    >
+      {children}
+    </div>
+  )
+}
+
+export function Criterion({
+  depth,
+  children,
+  evidence,
+  verdict,
+}: {
+  depth?: string | null
+  children: ReactNode
+  evidence?: ReactNode
+  verdict?: 'met' | 'partial' | 'missed' | null
+}) {
+  const d = depth ?? 'deep'
+  const verdictColor =
+    verdict === 'met' ? color.pass : verdict === 'partial' ? color.warn : color.faint
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: verdict ? '92px 1fr 74px' : '92px 1fr',
+        gap: space[3],
+        alignItems: 'start',
+        padding: `11px ${space[4]}px`,
+        background: color.surface,
+      }}
+    >
+      <span
+        style={{
+          fontFamily: font.mono,
+          fontSize: 9.5,
+          letterSpacing: '.1em',
+          textTransform: 'uppercase',
+          paddingTop: 2,
+          color: depthColor[d] ?? color.faint,
+        }}
+      >
+        {d}
+      </span>
+      <span style={{ ...type.bodySm, color: color.dim }}>
+        {children}
+        {evidence && (
+          <span
+            style={{
+              display: 'block',
+              fontFamily: font.mono,
+              fontSize: 11,
+              color: color.faint,
+              marginTop: 3,
+            }}
+          >
+            {evidence}
+          </span>
+        )}
+      </span>
+      {verdict && (
+        <span
+          style={{
+            fontFamily: font.mono,
+            fontSize: 11,
+            textAlign: 'right',
+            color: verdictColor,
+          }}
+        >
+          {verdict}
+        </span>
+      )}
+    </div>
+  )
+}
+
+/* ── Steps ─────────────────────────────────────────────────────────────── */
+
+export type StepState = 'done' | 'doing' | 'failed' | 'todo'
+
+const stepMark: Record<StepState, string> = { done: '✓', doing: '●', failed: '✗', todo: '·' }
+const stepMarkColor: Record<StepState, string> = {
+  done: color.pass,
+  doing: color.live,
+  failed: color.fail,
+  todo: color.faint,
+}
+
+/** A verdict list — why a stack won, or which rungs of a ladder held. */
+export function Steps({ children }: { children: ReactNode }) {
+  return <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 9 }}>{children}</ul>
+}
+
+export function StepItem({ state = 'todo', children }: { state?: StepState; children: ReactNode }) {
+  return (
+    <li style={{ display: 'grid', gridTemplateColumns: '18px 1fr', gap: space[2], alignItems: 'baseline' }}>
+      <span style={{ fontFamily: font.mono, fontSize: 12, color: stepMarkColor[state] }}>
+        {stepMark[state]}
+      </span>
+      <span
+        style={{
+          ...type.bodySm,
+          color: state === 'todo' ? color.faint : state === 'failed' ? color.dim : color.text,
+        }}
+      >
+        {children}
+      </span>
+    </li>
   )
 }
 
@@ -290,27 +750,40 @@ export function Field({
       <label htmlFor={id} style={{ ...type.label, color: color.faint, display: 'block', marginBottom: 6 }}>
         {label}
       </label>
-      <input
-        id={id}
-        className="aso-focusable"
-        type={inputType}
-        min={min}
-        value={value}
-        disabled={disabled}
-        placeholder={placeholder}
-        onChange={(e) => onChange(e.target.value)}
+      {/* The border lives on the wrapper so :focus-within can glow it — the
+          mockup's cue that the field is live, which a bare outline lost. */}
+      <div
+        className="aso-field"
         style={{
-          width: '100%',
+          display: 'flex',
           background: color.bg,
           border: `1px solid ${color.line}`,
           borderRadius: radius.md,
-          color: color.text,
-          fontFamily: mono ? font.mono : font.sans,
-          fontSize: 13.5,
-          padding: '10px 12px',
-          opacity: disabled ? 0.5 : 1,
+          transition: `border-color ${duration.base}s, box-shadow ${duration.base}s`,
         }}
-      />
+      >
+        <input
+          id={id}
+          type={inputType}
+          min={min}
+          value={value}
+          disabled={disabled}
+          placeholder={placeholder}
+          onChange={(e) => onChange(e.target.value)}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            background: 'none',
+            border: 0,
+            outline: 'none',
+            color: color.text,
+            fontFamily: mono ? font.mono : font.sans,
+            fontSize: 13.5,
+            padding: '10px 12px',
+            opacity: disabled ? 0.5 : 1,
+          }}
+        />
+      </div>
       {hint && (
         <div style={{ ...type.caption, color: color.faint, marginTop: 5 }}>{hint}</div>
       )}

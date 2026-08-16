@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../api'
 import type { Analysis, Commit, HiddenTest, ProposedTask } from '../../api'
+import { useStage } from '../../stages'
 
 /**
  * All wizard state and every mutation, in one place.
@@ -32,7 +33,9 @@ export const DAILY_FREE_REQUESTS = 50
 
 export function useWizard() {
   const navigate = useNavigate()
-  const [step, setStep] = useState<Step>(0)
+  // The position is shared with the rail, which renders the same progress from
+  // outside the router. Everything else below stays local to the wizard.
+  const { step, setStep } = useStage()
   const [error, setError] = useState<string | null>(null)
 
   // Repository
