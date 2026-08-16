@@ -132,6 +132,8 @@ export interface ProposedTask {
 export interface JudgeVerdict {
   score: number | null
   met: string[]
+  /** Substantively right but incomplete — scores half. */
+  partial: string[]
   missing: string[]
   invented: string[]
   rationale: string

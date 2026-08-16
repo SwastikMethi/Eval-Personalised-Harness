@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'motion/react'
 import { api } from '../api'
+import type { JudgeVerdict } from '../api'
 import { color, space, stateTone } from '../design/tokens'
 import { respectMotion, rise } from '../design/motion'
 import { font, type } from '../design/typography'
@@ -108,6 +109,10 @@ export default function RunPanel({ runId }: { runId: string }) {
   const usage = d.usage ?? {}
   const ev = d.evaluation
   const results = ev?.results ?? {}
+  // The evaluation payload is an open record of evaluator name → result, so the
+  // judge entry has to be named to be read safely. Partial<> because an
+  // evaluator that errored returns only `error`.
+  const judge: Partial<JudgeVerdict> | undefined = results.judge
   const running = !['COMPLETED', 'FAILED', 'CANCELLED', 'TIMED_OUT'].includes(d.state)
 
   return (
@@ -209,33 +214,33 @@ export default function RunPanel({ runId }: { runId: string }) {
               {/* The rubric verdict, legibly. It is in the raw dump below too,
                   but "which criteria did this answer actually meet" is the whole
                   result of a comprehension run and should not need reading JSON. */}
-              {results.judge && (
+              {judge && (
                 <div style={{ marginBottom: space[4] }}>
                   <p style={{ ...type.bodySm, color: color.dim, marginBottom: space[3] }}>
-                    {results.judge.rationale || 'graded against the task rubric'}
+                    {judge.rationale || 'graded against the task rubric'}
                   </p>
-                  {(results.judge.met ?? []).map((c: string) => (
+                  {(judge.met ?? []).map((c: string) => (
                     <div key={c} style={{ ...type.bodySm, color: color.pass, marginBottom: 2 }}>
                       ✓ {c}
                     </div>
                   ))}
-                  {(results.judge.partial ?? []).map((c: string) => (
+                  {(judge.partial ?? []).map((c: string) => (
                     <div key={c} style={{ ...type.bodySm, color: color.live, marginBottom: 2 }}>
                       ~ {c}
                     </div>
                   ))}
-                  {(results.judge.missing ?? []).map((c: string) => (
+                  {(judge.missing ?? []).map((c: string) => (
                     <div key={c} style={{ ...type.bodySm, color: color.warn, marginBottom: 2 }}>
                       ✗ {c}
                     </div>
                   ))}
-                  {(results.judge.invented ?? []).length > 0 && (
+                  {(judge.invented ?? []).length > 0 && (
                     <Notice tone="warn">
                       Named things that do not exist in this repository:{' '}
-                      {(results.judge.invented ?? []).join(', ')}
+                      {(judge.invented ?? []).join(', ')}
                     </Notice>
                   )}
-                  {results.judge.error && <Notice tone="fail">{results.judge.error}</Notice>}
+                  {judge.error && <Notice tone="fail">{judge.error}</Notice>}
                   <div style={{ ...type.caption, color: color.faint, marginTop: space[3] }}>
                     answer read from {results.answer_source} · {results.answer_chars} chars
                   </div>
