@@ -288,7 +288,13 @@ def test_the_prompt_tells_the_agent_to_read_the_repository() -> None:
     # Reading has to be explicitly permitted, or "do not modify any other file"
     # reads as "do not touch anything".
     assert "reading any file is expected" in lowered
-    assert "answer.md" in lowered
+    # "answer.md" used to be asserted here. It moved: the prompt is stored at
+    # task-creation time, before any harness is known, so fixing a filing
+    # convention in it handed mini-SWE-agent's shell idiom to a smolagents
+    # CodeAgent — which reported writing a file it never wrote. The two idioms
+    # and this prompt's deliberate silence are covered in
+    # tests/test_answer_delivery.py.
+    assert "answer.md" not in lowered
 
 
 def test_the_prompt_does_not_leak_the_rubric() -> None:

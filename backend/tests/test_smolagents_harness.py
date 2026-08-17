@@ -14,7 +14,12 @@ from typing import Any
 import pytest
 
 from app.harnesses.base import HarnessRunRequest
-from app.harnesses.smolagents_agent import RESULT_PATH, RUNNER_PATH, SmolagentsHarness
+from app.harnesses.smolagents_agent import (
+    RESULT_PATH,
+    RUNNER_PATH,
+    TASK_PATH,
+    SmolagentsHarness,
+)
 from app.sandboxes.exec import CommandResult
 
 PATCH = "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-return 1\n+return 2\n"
@@ -166,3 +171,48 @@ async def test_prepare_fails_loudly_when_smolagents_is_missing(tmp_path: Path) -
     harness = SmolagentsHarness(Missing({}))  # type: ignore[arg-type]
     with pytest.raises(SandboxError, match="not installed in the sandbox image"):
         await harness.prepare(_request(tmp_path))
+
+
+async def test_a_comprehension_task_is_asked_for_final_answer_not_a_file(
+    tmp_path: Path,
+) -> None:
+    """A CodeAgent exits through final_answer(); asking it to file a document
+    produced runs that claimed to have written ANSWER.md and returned a
+    497-character summary with an empty patch.
+    """
+    from app.harnesses.base import DELIVER_AS_FINAL_ANSWER
+
+    sandbox = StubSandbox({"status": "completed", "final_message": "answer", "steps": 4})
+    harness = SmolagentsHarness(sandbox)  # type: ignore[arg-type]
+    request = _request(tmp_path)
+    request.task_kind = "theory"
+
+    await harness.run(request)
+
+    delivered = sandbox.files[TASK_PATH]
+    assert DELIVER_AS_FINAL_ANSWER.strip() in delivered
+    assert "ANSWER.md" not in delivered
+
+
+async def test_a_commit_task_gets_no_answer_instruction(tmp_path: Path) -> None:
+    """A commit replay answers with a patch; an answer convention would be noise."""
+    sandbox = StubSandbox({"status": "completed", "final_message": "done", "steps": 3})
+    harness = SmolagentsHarness(sandbox)  # type: ignore[arg-type]
+    request = _request(tmp_path)  # defaults to kind "commit"
+
+    await harness.run(request)
+
+    assert sandbox.files[TASK_PATH] == request.task_prompt
+
+
+async def test_steps_are_not_reported_as_model_requests(tmp_path: Path) -> None:
+    """A measured run took 4 steps and made 11 upstream calls. The proxy counts
+    requests; the harness must not put a different quantity behind that name.
+    """
+    sandbox = StubSandbox({"status": "completed", "final_message": "a", "steps": 4})
+    harness = SmolagentsHarness(sandbox)  # type: ignore[arg-type]
+
+    result = await harness.run(_request(tmp_path))
+
+    assert result.model_requests is None
+    assert result.agent_steps == 4

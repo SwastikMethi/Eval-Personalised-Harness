@@ -25,9 +25,11 @@ class KeyedSandbox:
     def __init__(self) -> None:
         self.containers = {RUN_ID: object()}
         self.seen_ids: list[str] = []
+        self.commands: list[str] = []
 
     async def exec(self, run_id: str, command: str, timeout_s: int = 600) -> CommandResult:
         self.seen_ids.append(run_id)
+        self.commands.append(command)
         if run_id not in self.containers:
             raise KeyError(run_id)
         stdout = ""
@@ -143,3 +145,34 @@ async def test_prepare_fails_loudly_when_cli_is_missing(tmp_path: Path) -> None:
     harness = MiniSweAgentHarness(NoCli())  # type: ignore[arg-type]
     with pytest.raises(SandboxError, match="not installed in the sandbox image"):
         await harness.prepare(_request(tmp_path))
+
+
+def _launch_command(sandbox: KeyedSandbox) -> str:
+    """The `mini ...` invocation, which carries the task prompt."""
+    return next(c for c in sandbox.commands if " mini -y " in c)
+
+
+async def test_a_comprehension_task_is_asked_to_file_its_answer(tmp_path: Path) -> None:
+    """A shell agent files ANSWER.md, and grading reads it out of the diff.
+
+    The convention became per-harness, so this pins that mini-SWE-agent still
+    receives it after it moved out of the stored task prompt.
+    """
+    sandbox = KeyedSandbox()
+    harness = MiniSweAgentHarness(sandbox)  # type: ignore[arg-type]
+    request = _request(tmp_path)
+    request.task_kind = "theory"
+
+    await harness.run(request)
+
+    assert "ANSWER.md" in _launch_command(sandbox)
+
+
+async def test_a_commit_task_gets_no_answer_instruction(tmp_path: Path) -> None:
+    """A commit replay answers with a patch; an answer convention would be noise."""
+    sandbox = KeyedSandbox()
+    harness = MiniSweAgentHarness(sandbox)  # type: ignore[arg-type]
+
+    await harness.run(_request(tmp_path))  # defaults to kind "commit"
+
+    assert "ANSWER.md" not in _launch_command(sandbox)

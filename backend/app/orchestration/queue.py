@@ -576,6 +576,9 @@ class QueueWorker:
                 timeout_seconds=int(config.get("timeout_seconds", 1800)),
                 max_steps=int(config.get("max_steps", 50)),
                 temperature=float(config.get("temperature", 0.0)),
+                # Lets the adapter ask for the answer in its own idiom: a shell
+                # agent files ANSWER.md, a CodeAgent returns final_answer().
+                task_kind=task_kind,
                 metadata={"run_id": run_id},
                 proxy_base_url=proxy_base,
                 run_token=token,

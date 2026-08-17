@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.harnesses.base import (
+    DELIVER_AS_FILE,
     PATCH_EXTRACT_COMMAND,
     HarnessAdapter,
     HarnessRunRequest,
@@ -91,6 +92,11 @@ class MiniSweAgentHarness(HarnessAdapter):
             f"printf %s {shlex.quote(blob)} | base64 -d > {REGISTRY_PATH}",
             timeout_s=60,
         )
+        # A shell agent files its answer, so ask for the file. Only for
+        # comprehension tasks — a commit replay answers with a patch.
+        prompt = request.task_prompt + (
+            DELIVER_AS_FILE if request.task_kind == "theory" else ""
+        )
         cmd = (
             f"OPENAI_API_KEY={shlex.quote(request.run_token)} "
             f"OPENAI_BASE_URL={shlex.quote(request.proxy_base_url + '/v1')} "
@@ -104,7 +110,7 @@ class MiniSweAgentHarness(HarnessAdapter):
             f"LITELLM_REQUEST_TIMEOUT={max(int(request.timeout_seconds) // 3, 120)} "
             "LITELLM_NUM_RETRIES=0 "
             f"LITELLM_MODEL_REGISTRY_PATH={REGISTRY_PATH} "
-            f"mini -y -m {shlex.quote(model)} -t {shlex.quote(request.task_prompt)} "
+            f"mini -y -m {shlex.quote(model)} -t {shlex.quote(prompt)} "
             f"-o {TRAJECTORY_PATH} --exit-immediately"
         )
         result = await self._manager.exec(run_id, cmd, timeout_s=request.timeout_seconds)

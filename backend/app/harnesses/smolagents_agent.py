@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.harnesses.base import (
+    DELIVER_AS_FINAL_ANSWER,
     PATCH_EXTRACT_COMMAND,
     HarnessAdapter,
     HarnessRunRequest,
@@ -132,9 +133,13 @@ class SmolagentsHarness(HarnessAdapter):
         started = _now()
         run_id = request.metadata["run_id"]
 
-        await self._manager.exec(
-            run_id, _write_file_cmd(TASK_PATH, request.task_prompt), timeout_s=60
+        # A CodeAgent's exit contract IS final_answer(), so ask for the answer
+        # there rather than as a file. Asking for a file produced runs that
+        # claimed to have written one and returned a 497-character summary.
+        prompt = request.task_prompt + (
+            DELIVER_AS_FINAL_ANSWER if request.task_kind == "theory" else ""
         )
+        await self._manager.exec(run_id, _write_file_cmd(TASK_PATH, prompt), timeout_s=60)
         cmd = (
             f"OPENAI_API_KEY={shlex.quote(request.run_token)} "
             f"OPENAI_BASE_URL={shlex.quote(request.proxy_base_url + '/v1')} "
@@ -179,7 +184,11 @@ class SmolagentsHarness(HarnessAdapter):
             input_tokens=report.get("input_tokens"),
             output_tokens=report.get("output_tokens"),
             cached_tokens=None,
-            model_requests=int(report.get("steps") or 0),
+            # Steps are NOT requests: a measured run took 4 steps and made 11
+            # upstream calls. Reporting one as the other put a different
+            # quantity behind the name. The proxy counts requests; never
+            # fabricate them here.
+            model_requests=None,
             agent_steps=int(report.get("steps") or 0),
             tool_calls=int(report.get("tool_calls") or 0),
             commands_executed=None,  # CodeAgent executes Python, not shell commands

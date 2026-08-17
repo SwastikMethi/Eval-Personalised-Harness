@@ -49,6 +49,38 @@ class HarnessRunRequest:
     # Injected by the orchestrator: how the harness reaches the model proxy.
     proxy_base_url: str = ""
     run_token: str = ""
+    # A comprehension task is answered, a commit task is patched. The adapter
+    # needs to know which so it can ask for the answer in its own idiom.
+    task_kind: str = "commit"
+
+
+# How a comprehension answer is delivered, appended by the ADAPTER rather than
+# baked into the task prompt.
+#
+# It used to be baked in at task-creation time (`tasks_api.py`), which fixed one
+# convention — write ANSWER.md — before any harness was known. That convention
+# comes from mini-SWE-agent's shell loop, and handing it to a smolagents
+# CodeAgent produced runs that reported "Successfully wrote comprehensive
+# analysis to ANSWER.md" while the collected patch was empty: the agent had
+# spent 12k output tokens on analysis, then returned a 497-character summary
+# through `final_answer` and filed nothing. Grading an agent on whether it
+# obeyed a filing convention measures the convention.
+DELIVER_AS_FILE = (
+    "\n\nThe ONLY file you may create or modify is ANSWER.md in the repository "
+    "root — write your complete answer there, in Markdown, with no length "
+    "limit. Writing ANSWER.md is the last thing you should do; do not finish "
+    "without it. If for any reason you cannot write the file, put the complete "
+    "answer in your final message instead. An empty or one-line ending is a "
+    "failed attempt, however much you learned along the way."
+)
+
+DELIVER_AS_FINAL_ANSWER = (
+    "\n\nDeliver your answer by calling final_answer() with the COMPLETE text, "
+    "in Markdown, with no length limit. That call is the answer of record — a "
+    "summary of what you found is not an answer, and anything you leave in "
+    "intermediate output is not read. Do not create or modify any file; a note "
+    "saying you wrote the answer somewhere counts as no answer at all."
+)
 
 
 @dataclass

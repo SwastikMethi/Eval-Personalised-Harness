@@ -55,17 +55,13 @@ ANSWER_INSTRUCTION = (
     # stopped after three or four commands and answered from the file layout.
     "Cite the file each claim comes from, inline, like (src/server.py). A claim "
     "with no source behind it is worth less than one you checked.\n\n"
-    "Reading any file is expected. The ONLY file you may create or modify is "
-    "ANSWER.md in the repository root — write your complete answer there, in "
-    "Markdown, with no length limit.\n\n"
-    # Both harnesses read the repository and then finished without the file:
-    # asked a question, a coding agent answers in text, which is reasonable
-    # behaviour we should accommodate rather than fight. Grading an agent on
-    # whether it obeyed a filing convention measures the convention.
-    "Writing ANSWER.md is the last thing you should do — do not finish without "
-    "it. If for any reason you cannot write the file, put the complete answer "
-    "in your final message instead. An empty or one-line ending is a failed "
-    "attempt, however much you learned along the way."
+    "Reading any file is expected."
+    # HOW the answer is delivered is deliberately absent. It used to be here —
+    # "write ANSWER.md" — which fixed mini-SWE-agent's shell convention at
+    # task-creation time, before any harness was known, and a smolagents
+    # CodeAgent then reported writing a file it never wrote. The adapter
+    # appends its own idiom at run time: see DELIVER_AS_FILE and
+    # DELIVER_AS_FINAL_ANSWER in harnesses/base.py.
 )
 
 SYSTEM = """You design comprehension tasks that measure how well a coding agent
