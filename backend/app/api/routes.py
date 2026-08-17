@@ -17,6 +17,7 @@ from app.models import (
     RunEvent,
 )
 from app.models.core import RunState
+from app.orchestration.snapshot_key import group_tasks
 
 router = APIRouter()
 
@@ -231,14 +232,27 @@ async def create_experiment(
     )
     session.add(exp)
     session.flush()
-    run_count = 0
+    tasks = []
     for task_id in body.task_ids:
-        if session.get(BenchmarkTask, task_id) is None:
+        task = session.get(BenchmarkTask, task_id)
+        if task is None:
             raise HTTPException(404, f"task not found: {task_id}")
+        tasks.append(task)
+
+    # Tasks needing the same workspace share one run and one sandbox. Two
+    # comprehension questions about the same code do not need two clones of it;
+    # two commit replays cannot share one tree and stay separate.
+    groups = group_tasks(tasks, config)
+
+    run_count = 0
+    for group in groups:
         for combo_in in body.combinations:
             combo = ExperimentCombination(
                 experiment_id=exp.id,
-                task_id=task_id,
+                # First task of the group: representative, so every existing
+                # task_id lookup keeps resolving.
+                task_id=group[0],
+                task_ids=list(group),
                 harness=combo_in.harness,
                 provider=combo_in.provider,
                 model_id=combo_in.model_id,

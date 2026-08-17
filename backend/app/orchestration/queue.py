@@ -155,6 +155,26 @@ def materialize_workspace(
     )
 
 
+def _group_prompt(tasks: list[Any]) -> str:
+    """One prompt covering every task the run will attempt.
+
+    A single task keeps its prompt untouched, so nothing about the common case
+    changes. Several tasks are numbered, because the agent has to know it is
+    answering more than one thing and the grader reads them back by position.
+    """
+    if len(tasks) == 1:
+        return str(tasks[0].prompt)
+    parts = [
+        f"## Question {i} of {len(tasks)}\n\n{t.prompt}" for i, t in enumerate(tasks, 1)
+    ]
+    return (
+        f"You have {len(tasks)} separate questions about this one repository. "
+        "Answer every one of them. They are independent — a strong answer to one "
+        "does not excuse a missing answer to another. Number your answers to "
+        "match the questions.\n\n" + "\n\n".join(parts)
+    )
+
+
 def budget_failure_message(usage: dict[str, Any]) -> str:
     """Explain a spent budget from what was measured, not from what once happened.
 
@@ -504,11 +524,19 @@ class QueueWorker:
             assert run is not None
             combo = session.get(ExperimentCombination, run.combination_id)
             assert combo is not None
-            task = session.get(BenchmarkTask, combo.task_id)
+            # A combination may cover several tasks that share one snapshot.
+            # `task_ids` is authoritative; `task_id` is the group's first and is
+            # kept only so older rows and single-task lookups keep resolving.
+            group_ids = list(combo.task_ids or [combo.task_id])
+            found = (session.get(BenchmarkTask, tid) for tid in group_ids)
+            group: list[BenchmarkTask] = [t for t in found if t is not None]
+            task = group[0] if group else None
             experiment = session.get(Experiment, combo.experiment_id)
             assert task is not None and experiment is not None
             harness_name, model_id, provider = combo.harness, combo.model_id, combo.provider
-            prompt, task_id, task_kind = task.prompt, task.id, task.kind
+            task_id, task_kind = task.id, task.kind
+            group_task_ids = [t.id for t in group]
+            prompt = _group_prompt(group)
             config = dict(experiment.config)
             repo = session.get(Repository, task.repository_id)
             self._event(session, run_id, "preparing", {})
@@ -669,17 +697,22 @@ class QueueWorker:
             # would return "no evaluation configured" and the run would score
             # nothing at all.
             if task_kind == "theory":
-                evaluation = await self._judge(
-                    run_id,
-                    task_id,
-                    result.patch,
-                    result.final_message,
-                    effort={
-                        "commands_executed": result.commands_executed,
-                        "agent_steps": result.agent_steps,
-                        "model_requests": usage.get("requests"),
-                    },
-                )
+                effort = {
+                    "commands_executed": result.commands_executed,
+                    "agent_steps": result.agent_steps,
+                    "model_requests": usage.get("requests"),
+                }
+                # One verdict per task. A grouped run answered several questions
+                # from one exploration, and collapsing them into a single score
+                # would lose which question was answered well — and hand both
+                # scores to the group's first task in per-task aggregation.
+                verdicts = [
+                    await self._judge(
+                        run_id, tid, result.patch, result.final_message, effort=effort
+                    )
+                    for tid in group_task_ids
+                ]
+                evaluation = verdicts[0]
             else:
                 evaluation = await asyncio.to_thread(
                     self._evaluate, run_id, task_id, result.patch, config
@@ -922,7 +955,13 @@ class QueueWorker:
         with self._sessions() as session:
             session.add(
                 EvaluationResult(
-                    run_id=run_id, signal=signal, score=verdict.score, results=results
+                    run_id=run_id,
+                    # Stamped, or a grouped run's verdicts are indistinguishable
+                    # and per-task scoring silently reads only the first.
+                    task_id=task_id,
+                    signal=signal,
+                    score=verdict.score,
+                    results=results,
                 )
             )
             session.commit()

@@ -24,6 +24,16 @@ class EvaluationResult(Base, IdTimestampMixin):
     __tablename__ = "evaluation_results"
 
     run_id: Mapped[str] = mapped_column(ForeignKey("benchmark_runs.id"))
+    # Which task this score is for. Null on rows written before a run could
+    # cover more than one, and on commit runs where the combination's single
+    # task is unambiguous.
+    #
+    # Load-bearing for grouped runs: without it two answers from one run
+    # collapse into a single score, and the per-task efficiency normalisation
+    # in scoring/aggregate.py attributes both to the group's first task.
+    task_id: Mapped[str | None] = mapped_column(
+        ForeignKey("benchmark_tasks.id"), default=None
+    )
     signal: Mapped[str] = mapped_column(String(40), default="ok")
     score: Mapped[float | None] = mapped_column(Float, default=None)
     results: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

@@ -95,7 +95,17 @@ class ExperimentCombination(Base, IdTimestampMixin):
     __tablename__ = "experiment_combinations"
 
     experiment_id: Mapped[str] = mapped_column(ForeignKey("experiments.id"))
+    # The group's FIRST task, kept so existing rows and every task_id lookup
+    # keep resolving. Representative, not authoritative — read `task_ids`.
     task_id: Mapped[str] = mapped_column(ForeignKey("benchmark_tasks.id"))
+    # Every task this combination's runs attempt, in order.
+    #
+    # Tasks that need the SAME repository snapshot share one run and one
+    # sandbox: two comprehension questions about the same code do not need two
+    # clones and two explorations of it. Commit replays cannot be grouped —
+    # each needs its own base commit — so they stay one task per combination
+    # and this list has a single entry, exactly as before.
+    task_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     harness: Mapped[str] = mapped_column(String(100))
     provider: Mapped[str] = mapped_column(String(100))
     model_id: Mapped[str] = mapped_column(String(200))

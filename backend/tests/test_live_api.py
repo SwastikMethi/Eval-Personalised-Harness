@@ -232,3 +232,50 @@ async def test_cancel_experiment_stops_outstanding_runs(client: httpx.AsyncClien
     assert progress["by_state"].get("CANCELLED", 0) >= 1
     # Already-terminal runs are left alone rather than illegally transitioned.
     assert progress["finished"] is True
+
+
+async def test_comprehension_tasks_share_one_run_per_stack(
+    client: httpx.AsyncClient,
+) -> None:
+    """The reported case: 3 stacks x 2 comprehension tasks gave 6 runs.
+
+    Both tasks read the same HEAD snapshot, so six containers cloned the same
+    repository and re-explored the same code. One run per stack is enough.
+    """
+    repo = (
+        await client.post(
+            "/api/v1/repositories",
+            json={"name": "grouped", "source": "local", "path_or_url": str(FIXTURE)},
+        )
+    ).json()
+    tasks = [
+        (
+            await client.post(
+                "/api/v1/tasks",
+                json={
+                    "repository_id": repo["id"],
+                    "kind": "theory",
+                    "title": f"q{n}",
+                    "prompt": "p",
+                },
+            )
+        ).json()["id"]
+        for n in (1, 2)
+    ]
+
+    created = await client.post(
+        "/api/v1/experiments",
+        json={
+            "repository_id": repo["id"],
+            "name": "grouped",
+            "task_ids": tasks,
+            "combinations": [
+                {"harness": "fake", "provider": "fake", "model_id": "fake/deterministic-1:free"}
+            ],
+            "repetitions": 1,
+            "config": {"fixture_path": str(FIXTURE)},
+        },
+    )
+    assert created.status_code == 200, created.text
+    # One stack, two tasks, one repetition: one run, not two.
+    assert created.json()["runs"] == 1

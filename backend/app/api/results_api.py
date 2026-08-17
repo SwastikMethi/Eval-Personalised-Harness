@@ -35,11 +35,20 @@ def _samples(session: Session, experiment_id: str) -> list[RunSample]:
             select(BenchmarkRun).where(BenchmarkRun.combination_id == combo.id)
         ).all()
         for run in runs:
-            evaluation = session.scalars(
-                select(EvaluationResult)
-                .where(EvaluationResult.run_id == run.id)
-                .order_by(EvaluationResult.created_at.desc())
-            ).first()
+            # A run may answer several tasks that shared its snapshot, writing
+            # one evaluation each. Taking only the newest dropped every task but
+            # one and filed its score under the group's first task.
+            evaluations = list(
+                session.scalars(
+                    select(EvaluationResult)
+                    .where(EvaluationResult.run_id == run.id)
+                    .order_by(EvaluationResult.created_at.desc())
+                ).all()
+            )
+            # Newest per task, so a re-evaluation supersedes rather than doubles.
+            latest: dict[str | None, EvaluationResult] = {}
+            for ev in evaluations:
+                latest.setdefault(ev.task_id, ev)
             duration = None
             if run.started_at and run.completed_at:
                 duration = (run.completed_at - run.started_at).total_seconds()
@@ -53,20 +62,38 @@ def _samples(session: Session, experiment_id: str) -> list[RunSample]:
             tokens = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
             if not tokens:
                 tokens = (result.get("input_tokens") or 0) + (result.get("output_tokens") or 0)
-            samples.append(
-                RunSample(
-                    combination_id=combo.id,
-                    harness=combo.harness,
-                    model_id=combo.model_id,
-                    task_id=combo.task_id,
-                    state=run.state,
-                    score=evaluation.score if evaluation else result.get("score"),
-                    signal=evaluation.signal if evaluation else result.get("evaluation_signal"),
-                    duration_s=duration,
-                    total_tokens=tokens or None,
-                    patch_produced=bool(result.get("patch_produced")),
-                )
+            # Cost is per RUN, so a run answering several tasks must not report
+            # its full duration and tokens against each of them — that would
+            # make a grouped run look several times more expensive than it was
+            # and distort efficiency, which is normalised within a task.
+            # Sharing it evenly keeps the totals right and the per-task figure
+            # honest: two answers in 500s averaged 250s each.
+            per_task = max(len(latest) or len(combo.task_ids or [combo.task_id]), 1)
+            share = (duration / per_task) if duration is not None else None
+            token_share = (tokens // per_task) if tokens else 0
+
+            graded: list[tuple[str | None, EvaluationResult | None]] = (
+                list(latest.items()) if latest else [(combo.task_id, None)]
             )
+            for task_id, evaluation in graded:
+                samples.append(
+                    RunSample(
+                        combination_id=combo.id,
+                        harness=combo.harness,
+                        model_id=combo.model_id,
+                        task_id=task_id or combo.task_id,
+                        state=run.state,
+                        score=evaluation.score if evaluation else result.get("score"),
+                        signal=(
+                            evaluation.signal
+                            if evaluation
+                            else result.get("evaluation_signal")
+                        ),
+                        duration_s=share,
+                        total_tokens=token_share or None,
+                        patch_produced=bool(result.get("patch_produced")),
+                    )
+                )
     return samples
 
 
