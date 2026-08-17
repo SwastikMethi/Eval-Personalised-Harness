@@ -88,6 +88,59 @@ async def test_preview_reports_the_expanded_run_count(client: httpx.AsyncClient)
     assert "2 harnesses × 3 models × 3 tasks × 3 reps = 54 runs" == body["expression"]
 
 
+async def test_preview_counts_hand_picked_stacks_without_crossing_them(
+    client: httpx.AsyncClient,
+) -> None:
+    """Two chosen pairs are two stacks, not the four a grid would produce.
+
+    `POST /experiments` has always taken an arbitrary combination list; preview
+    was the last place that assumed a full grid, so it would have reported 4
+    for a matrix the server was about to queue as 2.
+    """
+    body = (
+        await client.post(
+            "/api/v1/experiments/preview",
+            json={
+                "task_ids": ["a", "b"],
+                "combinations": [
+                    {"harness": "mini-swe-agent", "provider": "nvidia", "model_id": "nemotron"},
+                    {"harness": "smolagents", "provider": "openrouter", "model_id": "gpt-oss"},
+                ],
+                "repetitions": 3,
+            },
+        )
+    ).json()
+
+    assert body["combinations"] == 2, "crossing them would have given 4"
+    assert body["runs"] == 12
+    assert body["expression"] == "2 stacks × 2 tasks × 3 reps = 12 runs"
+
+
+async def test_preview_counts_one_model_on_two_providers_as_two_stacks(
+    client: httpx.AsyncClient,
+) -> None:
+    """The provider is part of a stack's identity, not incidental to it."""
+    body = (
+        await client.post(
+            "/api/v1/experiments/preview",
+            json={
+                "task_ids": ["a"],
+                "combinations": [
+                    {"harness": "mini-swe-agent", "provider": "nvidia", "model_id": "same-model"},
+                    {
+                        "harness": "mini-swe-agent",
+                        "provider": "openrouter",
+                        "model_id": "same-model",
+                    },
+                ],
+                "repetitions": 1,
+            },
+        )
+    ).json()
+    assert body["combinations"] == 2
+    assert body["runs"] == 2
+
+
 async def test_progress_exposes_per_run_rows_for_the_live_screen(
     client: httpx.AsyncClient,
 ) -> None:

@@ -17,15 +17,14 @@ export default function StepReview({ w }: { w: Wizard }) {
   // The backend already computes this expansion. Showing its answer rather than
   // ours means the number on screen is the number that will be queued.
   const preview = useQuery({
-    queryKey: ['preview', w.taskIds, w.harnesses, w.models, w.reps],
+    queryKey: ['preview', w.taskIds, w.stacks, w.reps],
     queryFn: () =>
       api.preview({
         task_ids: w.taskIds,
-        harnesses: w.harnesses,
-        model_ids: w.models,
+        combinations: w.stacks,
         repetitions: w.reps,
       }),
-    enabled: w.taskIds.length > 0 && w.harnesses.length > 0 && w.models.length > 0,
+    enabled: w.taskIds.length > 0 && w.stacks.length > 0,
     retry: false,
   })
 
@@ -80,7 +79,7 @@ export default function StepReview({ w }: { w: Wizard }) {
 
           <Check
             checked={w.uncapped}
-            disabled={w.activeProvider?.has_free_tier !== false}
+            disabled={w.anyFreeTier}
             onChange={w.setUncapped}
             label={
               <span style={{ ...type.bodySm, color: color.dim }}>
@@ -89,8 +88,8 @@ export default function StepReview({ w }: { w: Wizard }) {
             }
           />
           <div style={{ ...type.caption, color: color.faint, margin: `4px 0 ${space[4]}px` }}>
-            {w.activeProvider?.has_free_tier !== false
-              ? 'unavailable on a free tier: one uncapped run would spend the daily quota'
+            {w.anyFreeTier
+              ? 'unavailable while any stack is on a free tier: one uncapped run would spend the daily quota'
               : w.uncapped
                 ? 'bounded by the token ceiling and the 30-minute timeout instead. A run that ' +
                   'times out having produced a patch is still graded.'
@@ -102,8 +101,7 @@ export default function StepReview({ w }: { w: Wizard }) {
             <tbody>
               {(
                 [
-                  ['harnesses', w.harnesses.length],
-                  ['models', w.models.length],
+                  ['stacks', w.stacks.length],
                   ['tasks', w.taskIds.length],
                   ['repetitions', w.reps],
                 ] as const
@@ -190,28 +188,31 @@ export default function StepReview({ w }: { w: Wizard }) {
         </Panel>
 
         <Panel label="Stacks entered">
-          {w.harnesses.length === 0 || w.models.length === 0 ? (
+          {w.stacks.length === 0 ? (
             <div style={{ ...type.bodySm, color: color.faint }}>Nothing selected yet.</div>
           ) : (
-            w.harnesses.flatMap((h) =>
-              w.models.map((m) => (
-                <div
-                  key={`${h}-${m}`}
-                  style={{
-                    display: 'flex',
-                    gap: space[2],
-                    padding: `${space[2]}px 0`,
-                    borderBottom: `1px solid ${color.lineSoft}`,
-                    fontFamily: font.mono,
-                    fontSize: 12.5,
-                  }}
-                >
-                  <span style={{ color: color.text }}>{h}</span>
-                  <span style={{ color: color.faint }}>×</span>
-                  <span style={{ color: color.dim }}>{m.replace(/:free$/, '')}</span>
-                </div>
-              )),
-            )
+            w.stacks.map((s) => (
+              <div
+                key={`${s.harness}-${s.provider}-${s.model_id}`}
+                style={{
+                  display: 'flex',
+                  gap: space[2],
+                  alignItems: 'baseline',
+                  padding: `${space[2]}px 0`,
+                  borderBottom: `1px solid ${color.lineSoft}`,
+                  fontFamily: font.mono,
+                  fontSize: 12.5,
+                }}
+              >
+                <span style={{ color: color.text }}>{s.harness}</span>
+                <span style={{ color: color.faint }}>×</span>
+                <span style={{ color: color.dim }}>{s.model_id.replace(/:free$/, '')}</span>
+                <span style={{ flexGrow: 1 }} />
+                {/* The provider is part of the stack's identity now, so it has
+                    to be visible in the last review before anything is spent. */}
+                <span style={{ ...type.caption, color: color.faint }}>{s.provider}</span>
+              </div>
+            ))
           )}
         </Panel>
       </div>

@@ -14,32 +14,44 @@ import {
   ScreenTitle,
   Segmented,
   StackCard,
-  Status,
 } from '../../ui'
-import type { Wizard } from './useWizard'
+import { stackKey, type Wizard } from './useWizard'
 
 /**
  * Which setups should compete?
  *
- * A stack is one harness against one model, and the matrix is every pairing. It
- * used to be two checkbox lists, which meant the thing being compared — the
- * pairing — was never actually shown; you had to multiply it in your head.
+ * A stack is one harness against one model on one provider, and it used to be
+ * impossible to say that: two checkbox lists were multiplied into every
+ * pairing, on a single provider for the whole matrix. The picker still crosses
+ * what you tick in one visit — a sweep should not cost more clicks than before
+ * — but visits accumulate, so an arbitrary set of pairs is finally expressible.
  */
 export default function StepStacks({ w }: { w: Wizard }) {
   const [picking, setPicking] = useState(false)
 
-  const stacks = w.harnesses.flatMap((h) => w.models.map((m) => ({ harness: h, model: m })))
+  const close = () => {
+    setPicking(false)
+    w.setDraftHarnesses([])
+    w.setDraftModels([])
+  }
+  const confirm = () => {
+    w.addDraftStacks()
+    setPicking(false)
+  }
+
+  const draftCount = w.draftStacks.length
+  const mixedProviders = new Set(w.stacks.map((s) => s.provider)).size > 1
 
   return (
     <div>
       <ScreenTitle
         ask="Which setups should compete?"
         title={
-          stacks.length === 0
+          w.stacks.length === 0
             ? 'Choose the stacks'
-            : `${stacks.length} agent stack${stacks.length === 1 ? '' : 's'}`
+            : `${w.stacks.length} agent stack${w.stacks.length === 1 ? '' : 's'}`
         }
-        lede="Every harness is paired with every model you pick. Each pairing runs the same tasks against the same snapshot, so the only thing that differs is the stack."
+        lede="Each stack is one harness against one model. They run the same tasks against the same snapshot, so the stack is the only thing that differs — and they need not share a provider."
       />
 
       <div
@@ -50,53 +62,84 @@ export default function StepStacks({ w }: { w: Wizard }) {
           marginBottom: space[4],
         }}
       >
-        {stacks.map((s) => (
-          <StackCard
-            key={`${s.harness}-${s.model}`}
-            selected
-            harness={s.harness}
-            model={s.model.replace(/:free$/, '')}
-            status={<span style={{ ...type.caption, color: color.faint }}>×</span>}
-            footer={
-              <span style={{ ...type.caption, color: color.faint }}>
-                {w.reps} rep{w.reps === 1 ? '' : 's'} · {w.taskIds.length} task
-                {w.taskIds.length === 1 ? '' : 's'}
-              </span>
-            }
-          />
-        ))}
+        {w.stacks.map((s) => {
+          const key = stackKey(s)
+          return (
+            <StackCard
+              key={key}
+              selected
+              harness={s.harness}
+              model={s.model_id.replace(/:free$/, '')}
+              // A separate button, not the card itself: StackCard's body is a
+              // <button> when clickable, and nesting buttons is invalid and
+              // breaks the keyboard order.
+              status={
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => w.removeStack(key)}
+                  title={`Remove ${s.harness} × ${s.model_id}`}
+                >
+                  remove
+                </Button>
+              }
+              footer={
+                <>
+                  <span style={{ ...type.caption, color: color.faint }}>{s.provider}</span>
+                  <span style={{ ...type.caption, color: color.faint }}>
+                    {w.reps} rep{w.reps === 1 ? '' : 's'} · {w.taskIds.length} task
+                    {w.taskIds.length === 1 ? '' : 's'}
+                  </span>
+                </>
+              }
+            />
+          )
+        })}
         <AddCard onClick={() => setPicking(true)}>
-          {stacks.length === 0 ? '+ Choose harnesses and models' : '+ Add agent stack'}
+          {w.stacks.length === 0 ? '+ Choose harnesses and models' : '+ Add agent stack'}
         </AddCard>
       </div>
 
-      {stacks.length === 0 && (
+      {w.stacks.length === 0 && (
         <Notice tone="info">
-          Nothing selected yet. A comparison needs at least one harness and one model.
+          Nothing selected yet. Add one harness and one model for a single stack, or tick several
+          of each to add every pairing between them at once.
+        </Notice>
+      )}
+
+      {mixedProviders && (
+        <Notice tone="info">
+          This matrix spans more than one provider. That is a fair comparison of stacks, but cost
+          and latency are not comparable across providers — only correctness is.
         </Notice>
       )}
 
       <Row style={{ justifyContent: 'space-between' }}>
         <span style={{ ...type.bodySm, color: color.dim }}>
-          {stacks.length === 0
+          {w.stacks.length === 0
             ? 'pick at least one harness and one model'
-            : `${w.harnesses.length} harness${w.harnesses.length === 1 ? '' : 'es'} × ${
-                w.models.length
-              } model${w.models.length === 1 ? '' : 's'}`}
+            : `${w.stacks.length} stack${w.stacks.length === 1 ? '' : 's'} will compete`}
         </span>
-        <Button variant="primary" disabled={stacks.length === 0} onClick={() => w.setStep(3)}>
+        <Button variant="primary" disabled={w.stacks.length === 0} onClick={() => w.setStep(3)}>
           Continue
         </Button>
       </Row>
 
       <Dialog
         open={picking}
-        title="Harnesses and models"
-        onClose={() => setPicking(false)}
+        title="Add agent stacks"
+        onClose={close}
         footer={
-          <Button variant="primary" onClick={() => setPicking(false)}>
-            Done
-          </Button>
+          <>
+            <Button variant="ghost" onClick={close}>
+              Cancel
+            </Button>
+            <Button variant="primary" disabled={draftCount === 0} onClick={confirm}>
+              {draftCount === 0
+                ? 'Add stacks'
+                : `Add ${draftCount} stack${draftCount === 1 ? '' : 's'}`}
+            </Button>
+          </>
         }
       >
         <Panel label="Harnesses" style={{ marginBottom: space[4] }}>
@@ -106,8 +149,8 @@ export default function StepStacks({ w }: { w: Wizard }) {
             (w.availableHarnesses.data ?? []).map((h) => (
               <Check
                 key={h.name}
-                checked={w.harnesses.includes(h.name)}
-                onChange={() => w.toggle(w.harnesses, h.name, w.setHarnesses)}
+                checked={w.draftHarnesses.includes(h.name)}
+                onChange={() => w.toggle(w.draftHarnesses, h.name, w.setDraftHarnesses)}
                 label={
                   <Row gap={space[2]}>
                     <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>
@@ -130,7 +173,7 @@ export default function StepStacks({ w }: { w: Wizard }) {
               checked={w.showPaid}
               onChange={(on) => {
                 w.setShowPaid(on)
-                w.setModels([])
+                w.setDraftModels([])
               }}
               label={<span style={{ ...type.bodySm, color: color.dim }}>include paid</span>}
             />
@@ -142,7 +185,9 @@ export default function StepStacks({ w }: { w: Wizard }) {
               value={w.provider}
               onChange={(v) => {
                 w.setProvider(v)
-                w.setModels([]) // ids are provider-specific
+                // Model ids are provider-specific, so a half-made selection
+                // would silently point at the wrong catalogue.
+                w.setDraftModels([])
               }}
               options={(w.providers.data ?? []).map((p) => ({
                 value: p.name,
@@ -185,12 +230,12 @@ export default function StepStacks({ w }: { w: Wizard }) {
           {w.availableModels.isLoading ? (
             <Empty>Listing models…</Empty>
           ) : (
-            <div style={{ maxHeight: 280, overflowY: 'auto' }}>
+            <div style={{ maxHeight: 260, overflowY: 'auto' }}>
               {w.sortedModels.map((m) => (
                 <Check
                   key={m.model_id}
-                  checked={w.models.includes(m.model_id)}
-                  onChange={() => w.toggle(w.models, m.model_id, w.setModels)}
+                  checked={w.draftModels.includes(m.model_id)}
+                  onChange={() => w.toggle(w.draftModels, m.model_id, w.setDraftModels)}
                   label={
                     <span style={{ fontFamily: font.mono, fontSize: 12.5, color: color.text }}>
                       {m.model_id}
@@ -215,13 +260,15 @@ export default function StepStacks({ w }: { w: Wizard }) {
           )}
         </Panel>
 
-        {stacks.length > 0 && (
-          <div style={{ marginTop: space[4] }}>
-            <Status tone="live">
-              {stacks.length} stack{stacks.length === 1 ? '' : 's'}
-            </Status>
-          </div>
-        )}
+        {/* Say what this visit will contribute, so a multi-tick never
+            multiplies into more stacks than the reader expected. */}
+        <div style={{ ...type.caption, color: color.faint, marginTop: space[4] }}>
+          {draftCount === 0
+            ? 'tick at least one harness and one model'
+            : `${w.draftHarnesses.length} × ${w.draftModels.length} = ${draftCount} stack${
+                draftCount === 1 ? '' : 's'
+              } on ${w.provider}, added to the ${w.stacks.length} already chosen`}
+        </div>
       </Dialog>
     </div>
   )

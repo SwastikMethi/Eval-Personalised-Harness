@@ -417,10 +417,13 @@ export const api = {
   approveHiddenTest: (id: string, approved: boolean) =>
     put<{ ok: boolean }>(`/hidden-tests/${id}`, { approved }),
 
+  // `combinations` is the explicit stack list. `harnesses`/`model_ids` remain
+  // for the older product-shaped form, which the server still expands.
   preview: (body: {
     task_ids: string[]
-    harnesses: string[]
-    model_ids: string[]
+    combinations?: { harness: string; provider: string; model_id: string }[]
+    harnesses?: string[]
+    model_ids?: string[]
     repetitions: number
   }) => post<MatrixPreview>('/experiments/preview', body),
   createExperiment: (body: unknown) => post<{ id: string; runs: number }>('/experiments', body),

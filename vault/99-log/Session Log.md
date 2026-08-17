@@ -399,4 +399,20 @@ Two things already worked and are worth recording so nobody re-derives them: `mi
 
 ---
 
+## 2026-08-17 — A stack is a pair you choose, not a cell in a grid
+
+Agent Stacks ticked harnesses in one list and models in another and silently multiplied them, so two harnesses and three models was always all six pairings. A single global `provider` meant every model had to come from the same one, which made an NVIDIA-hosted model and an OpenRouter-hosted one impossible to compare in one matrix.
+
+**The backend never had this restriction.** `POST /experiments` has always taken `combinations: list[{harness, provider, model_id}]` and iterated it verbatim (`routes.py:218`). Only the frontend insisted on a product. `POST /experiments/preview` was the one server-side holdout, computing `len(harnesses) * len(model_ids)` — it would have reported 4 for a matrix the server was about to queue as 2.
+
+**`Stack` is now a value** (`useWizard.ts`), and the provider belongs to it rather than to the experiment. The picker keeps crossing what you tick *in one visit* — a sweep should not cost more clicks — but visits **accumulate**, deduplicated on the whole triple. One model on two providers stays two stacks; the same triple twice stays one. Each card carries a `remove`, and because `StackCard`'s body is itself a `<button>`, that control sits in the `status` slot rather than nested inside it.
+
+**A consequence worth naming:** `uncapped` was gated on the single provider's `has_free_tier`. With a mixed matrix that becomes "any selected stack is on a free tier" — otherwise one OpenRouter stack added to an NVIDIA run would quietly offer an uncapped run that spends the daily quota.
+
+**Verify:** ruff ✅ · mypy ✅ · **381 backend passed** (was 379) · frontend **46 passed** (was 41), build/tsc/oxlint green. Walked in a browser against a backend built from this branch: `mini-swe-agent × north-mini-code` on openrouter plus `smolagents × deepseek-coder` on nvidia → **two cards, two providers, Review reads `stacks 2` and `total runs 2`**, and removing one leaves one rather than re-multiplying. Preview confirmed directly: two hand-picked pairs → `2 stacks × 1 tasks × 1 reps = 2 runs`; the old product form still returns 54.
+
+**Not tested, and why:** a creation-path test for "2 of 4 pairs" needs two distinct models or two non-sandboxed harnesses, and the fake provider ships one of each — anything else spawns Docker mid-test. The arithmetic is covered at preview instead, and the creation loop is pre-existing and already exercised.
+
+---
+
 <!-- New entries above this line -->

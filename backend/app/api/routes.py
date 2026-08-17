@@ -145,8 +145,14 @@ def list_available_harnesses() -> list[dict[str, Any]]:
 
 class PreviewIn(BaseModel):
     task_ids: list[str]
-    harnesses: list[str]
-    model_ids: list[str]
+    # The chosen stacks. `POST /experiments` has always taken an arbitrary list
+    # of these; preview was the one place that still assumed a full grid, which
+    # made it disagree with reality as soon as the UI could express a
+    # hand-picked set of pairs.
+    combinations: list[CombinationIn] | None = None
+    # The older product form, still expanded server-side for existing callers.
+    harnesses: list[str] = []
+    model_ids: list[str] = []
     repetitions: int = 3
 
 
@@ -157,19 +163,33 @@ def preview_matrix(body: PreviewIn) -> dict[str, Any]:
     Also reports the model-request ceiling, because on a free tier the
     binding constraint is requests per day, not wall-clock.
     """
-    combos = len(body.harnesses) * len(body.model_ids)
+    explicit = body.combinations is not None
+    if explicit:
+        combos = len(body.combinations or [])
+        harnesses = len({c.harness for c in body.combinations or []})
+        models = len({c.model_id for c in body.combinations or []})
+    else:
+        harnesses, models = len(body.harnesses), len(body.model_ids)
+        combos = harnesses * models
+
     runs = combos * len(body.task_ids) * body.repetitions
+    expression = (
+        f"{combos} stack{'' if combos == 1 else 's'} × {len(body.task_ids)} tasks × "
+        f"{body.repetitions} reps = {runs} runs"
+        if explicit
+        else (
+            f"{harnesses} harnesses × {models} models × "
+            f"{len(body.task_ids)} tasks × {body.repetitions} reps = {runs} runs"
+        )
+    )
     return {
-        "harnesses": len(body.harnesses),
-        "models": len(body.model_ids),
+        "harnesses": harnesses,
+        "models": models,
         "tasks": len(body.task_ids),
         "repetitions": body.repetitions,
         "combinations": combos,
         "runs": runs,
-        "expression": (
-            f"{len(body.harnesses)} harnesses × {len(body.model_ids)} models × "
-            f"{len(body.task_ids)} tasks × {body.repetitions} reps = {runs} runs"
-        ),
+        "expression": expression,
     }
 
 

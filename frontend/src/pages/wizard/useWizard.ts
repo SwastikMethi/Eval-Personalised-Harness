@@ -21,6 +21,21 @@ import { useStage } from '../../stages'
 export const STEPS = ['Repository', 'Tasks', 'Agent stacks', 'Review'] as const
 export type Step = 0 | 1 | 2 | 3
 
+/**
+ * One harness against one model on one provider — the unit being benchmarked.
+ *
+ * The provider belongs to the stack, not to the experiment: the same model
+ * served by NVIDIA and by OpenRouter is two different stacks, and telling them
+ * apart is exactly the kind of question this tool exists to answer.
+ */
+export interface Stack {
+  harness: string
+  provider: string
+  model_id: string
+}
+
+export const stackKey = (s: Stack) => `${s.harness}|${s.provider}|${s.model_id}`
+
 /** Only `test` is load-bearing. The backend skips a blank install/build/lint/
  *  typecheck outright, so presenting them as equal fields implies work the
  *  user does not need to do — most Python repos have no build step at all. */
@@ -68,9 +83,19 @@ export function useWizard() {
   // bad nomination never traps the user.
   const [showAllCommits, setShowAllCommits] = useState(false)
 
-  // Stacks + review
-  const [harnesses, setHarnesses] = useState<string[]>([])
-  const [models, setModels] = useState<string[]>([])
+  // Stacks + review.
+  //
+  // A stack is the thing being compared, so it is stored as one. Two lists
+  // multiplied together could only ever express a full grid: you could not run
+  // `mini-swe-agent × nemotron` against `smolagents × gpt-oss` and nothing
+  // else, and because the provider was a single value for the whole matrix,
+  // every model had to come from the same one.
+  const [stacks, setStacks] = useState<Stack[]>([])
+  // What the picker has ticked right now. Short-lived, and separate from
+  // `stacks` so that closing the dialog adds to the selection rather than
+  // replacing it.
+  const [draftHarnesses, setDraftHarnesses] = useState<string[]>([])
+  const [draftModels, setDraftModels] = useState<string[]>([])
   const [reps, setReps] = useState(1)
   // Two knobs, not one. They used to be the same number sent as both
   // max_model_requests and max_steps, which meant you could not bound spend
@@ -87,6 +112,8 @@ export function useWizard() {
   // this account has no credits, so listing the rest is 400 ways to fail.
   const [showPaid, setShowPaid] = useState(false)
   const [modelFilter, setModelFilter] = useState('')
+  // Which catalogue the picker is browsing. NOT the experiment's provider —
+  // each stack carries its own, so one matrix can mix NVIDIA and OpenRouter.
   const [provider, setProvider] = useState('openrouter')
 
   const availableHarnesses = useQuery({ queryKey: ['harnesses'], queryFn: api.harnesses })
@@ -330,21 +357,22 @@ export function useWizard() {
     mutationFn: async () => {
       // Pin exact model metadata per experiment so a model that later vanishes
       // fails its combination loudly instead of being silently substituted.
-      for (const m of models) {
+      // Each against ITS OWN provider — the same model id can exist on two.
+      for (const s of stacks) {
         try {
-          await api.snapshotModel(provider, m)
+          await api.snapshotModel(s.provider, s.model_id)
         } catch {
           /* snapshot is best-effort; pricing just stays unknown */
         }
       }
-      const combinations = harnesses.flatMap((h) =>
-        models.map((m) => ({ harness: h, provider, model_id: m })),
-      )
       return api.createExperiment({
         repository_id: repoId,
-        name: `${harnesses.length}×${models.length} · ${new Date().toISOString().slice(0, 16)}`,
+        // "2×1" described a grid. The selection is no longer necessarily one.
+        name: `${stacks.length} stack${stacks.length === 1 ? '' : 's'} · ${new Date()
+          .toISOString()
+          .slice(0, 16)}`,
         task_ids: taskIds,
-        combinations,
+        combinations: stacks,
         repetitions: reps,
         config: {
           // null is the wire form of "uncapped" — the backend only applies its
@@ -370,14 +398,13 @@ export function useWizard() {
     if (needsAttention) setSetupOpen(true)
   }, [needsAttention])
 
-  const runs = harnesses.length * models.length * taskIds.length * reps
+  const runs = stacks.length * taskIds.length * reps
   const requests = runs * budget
   const overDailyCap = requests > DAILY_FREE_REQUESTS
 
   const blockers: string[] = []
   if (taskIds.length === 0) blockers.push('pick at least one task')
-  if (harnesses.length === 0) blockers.push('pick at least one harness')
-  if (models.length === 0) blockers.push('pick at least one model')
+  if (stacks.length === 0) blockers.push('add at least one agent stack')
   // Neither applies to a comprehension-only matrix: the rubric is the signal.
   if (!theoryOnly && !testCommand)
     blockers.push('no test command — there is no correctness signal without one')
@@ -402,6 +429,43 @@ export function useWizard() {
 
   const toggle = (list: string[], value: string, set: (v: string[]) => void) =>
     set(list.includes(value) ? list.filter((v) => v !== value) : [...list, value])
+
+  /** What the picker's current ticks would contribute. */
+  const draftStacks: Stack[] = draftHarnesses.flatMap((harness) =>
+    draftModels.map((model_id) => ({ harness, provider, model_id })),
+  )
+
+  /**
+   * Fold the picker's ticks into the selection.
+   *
+   * Crossing within one visit is deliberate — a full sweep should still be one
+   * pass — but visits ADD rather than replace, which is what makes an arbitrary
+   * set of pairs expressible at all. Deduplicated on the whole triple, so the
+   * same model from two providers survives as two stacks while the same stack
+   * twice stays one.
+   */
+  const addDraftStacks = () => {
+    setStacks((prev) => {
+      const seen = new Set(prev.map(stackKey))
+      return [...prev, ...draftStacks.filter((s) => !seen.has(stackKey(s)))]
+    })
+    setDraftHarnesses([])
+    setDraftModels([])
+  }
+
+  const removeStack = (key: string) =>
+    setStacks((prev) => prev.filter((s) => stackKey(s) !== key))
+
+  /**
+   * Whether any chosen stack is served by a free tier.
+   *
+   * Uncapped used to be gated on the single global provider. With a mixed
+   * matrix that would let one OpenRouter stack ride along uncapped inside an
+   * otherwise credit-billed run and quietly spend the daily quota.
+   */
+  const anyFreeTier = stacks.some(
+    (s) => (providers.data ?? []).find((p) => p.name === s.provider)?.has_free_tier !== false,
+  )
 
   return {
     step,
@@ -439,10 +503,16 @@ export function useWizard() {
     showAllCommits,
     setShowAllCommits,
 
-    harnesses,
-    setHarnesses,
-    models,
-    setModels,
+    stacks,
+    setStacks,
+    draftHarnesses,
+    setDraftHarnesses,
+    draftModels,
+    setDraftModels,
+    draftStacks,
+    addDraftStacks,
+    removeStack,
+    anyFreeTier,
     reps,
     setReps,
     budget,

@@ -97,7 +97,7 @@ async function reachReview() {
   await openPicker(user)
   await user.click(await screen.findByLabelText(/mini-swe-agent/))
   await user.click(await screen.findByLabelText(/gpt-oss-20b/))
-  await user.click(screen.getByRole('button', { name: /^Done$/ }))
+  await user.click(screen.getByRole('button', { name: /^Add \d+ stacks?$/ }))
   await user.click(await screen.findByRole('button', { name: /^Continue$/ }))
   return user
 }
@@ -149,10 +149,98 @@ async function reachReviewViaTheory() {
   await openPicker(user)
   await user.click(await screen.findByLabelText(/mini-swe-agent/))
   await user.click(await screen.findByLabelText(/gpt-oss-20b/))
-  await user.click(screen.getByRole('button', { name: /^Done$/ }))
+  await user.click(screen.getByRole('button', { name: /^Add \d+ stacks?$/ }))
   await user.click(await screen.findByRole('button', { name: /^Continue$/ }))
   return user
 }
+
+describe('Agent stacks are chosen pairs, not a grid', () => {
+  it('adds one stack for one harness and one model', async () => {
+    mockRepo()
+    const user = await reachCombos()
+    await openPicker(user)
+    await user.click(await screen.findByLabelText(/mini-swe-agent/))
+    await user.click(await screen.findByLabelText(/gpt-oss-20b/))
+    await user.click(screen.getByRole('button', { name: /^Add 1 stack$/ }))
+
+    expect(await screen.findByText('1 agent stack')).toBeInTheDocument()
+  })
+
+  it('accumulates across visits instead of replacing', async () => {
+    // The property the whole change exists for: two hand-picked pairs, not the
+    // four that crossing both selections would have produced.
+    mockRepo()
+    const user = await reachCombos()
+
+    await openPicker(user)
+    await user.click(await screen.findByLabelText(/mini-swe-agent/))
+    await user.click(await screen.findByLabelText(/gpt-oss-20b/))
+    await user.click(screen.getByRole('button', { name: /^Add 1 stack$/ }))
+
+    await openPicker(user)
+    await user.click(await screen.findByLabelText(/smolagents/))
+    await user.click(await screen.findByLabelText(/north-mini-code/))
+    await user.click(screen.getByRole('button', { name: /^Add 1 stack$/ }))
+
+    expect(await screen.findByText('2 agent stacks')).toBeInTheDocument()
+    await user.click(await screen.findByRole('button', { name: /^Continue$/ }))
+    expect(await screen.findByRole('button', { name: /Start 2 runs/ })).toBeEnabled()
+  })
+
+  it('can mix providers in one matrix', async () => {
+    mockRepo()
+    const { NIM_MODELS, OPENROUTER_MODELS } = await import('../test/server')
+    server.use(
+      http.get('/api/v1/providers/:provider/models', ({ params }) =>
+        HttpResponse.json(params.provider === 'nvidia' ? NIM_MODELS : OPENROUTER_MODELS),
+      ),
+    )
+    const user = await reachCombos()
+
+    await openPicker(user)
+    await user.click(await screen.findByLabelText(/mini-swe-agent/))
+    await user.click(await screen.findByLabelText(/gpt-oss-20b/))
+    await user.click(screen.getByRole('button', { name: /^Add 1 stack$/ }))
+
+    await openPicker(user)
+    await user.click(await screen.findByRole('button', { name: /nvidia/ }))
+    await user.click(await screen.findByLabelText(/smolagents/))
+    await user.click(await screen.findByLabelText(/deepseek-coder/))
+    await user.click(screen.getByRole('button', { name: /^Add 1 stack$/ }))
+
+    expect(await screen.findByText('2 agent stacks')).toBeInTheDocument()
+    // Both providers named on the cards — the provider is part of a stack's
+    // identity now, so it has to be visible.
+    expect(await screen.findByText('openrouter')).toBeInTheDocument()
+    expect(await screen.findByText('nvidia')).toBeInTheDocument()
+  })
+
+  it('removes a single stack without re-multiplying the rest', async () => {
+    mockRepo()
+    const user = await reachCombos()
+    await openPicker(user)
+    await user.click(await screen.findByLabelText(/mini-swe-agent/))
+    await user.click(await screen.findByLabelText(/smolagents/))
+    await user.click(await screen.findByLabelText(/gpt-oss-20b/))
+    await user.click(screen.getByRole('button', { name: /^Add 2 stacks$/ }))
+
+    expect(await screen.findByText('2 agent stacks')).toBeInTheDocument()
+    await user.click((await screen.findAllByRole('button', { name: /^remove$/ }))[0])
+    expect(await screen.findByText('1 agent stack')).toBeInTheDocument()
+  })
+
+  it('does not add the same stack twice', async () => {
+    mockRepo()
+    const user = await reachCombos()
+    for (const _ of [1, 2]) {
+      await openPicker(user)
+      await user.click(await screen.findByLabelText(/mini-swe-agent/))
+      await user.click(await screen.findByLabelText(/gpt-oss-20b/))
+      await user.click(screen.getByRole('button', { name: /^Add 1 stack$/ }))
+    }
+    expect(await screen.findByText('1 agent stack')).toBeInTheDocument()
+  })
+})
 
 describe('Comprehension-only matrix', () => {
   it('never runs a baseline, and never blocks on one', { timeout: 30_000 }, async () => {
@@ -250,7 +338,7 @@ describe('Setup wizard', () => {
     await user.click(await screen.findByLabelText(/mini-swe-agent/))
     await user.click(screen.getByLabelText(/smolagents/))
     await user.click(await screen.findByLabelText(/gpt-oss-20b/))
-    await user.click(screen.getByRole('button', { name: /^Done$/ }))
+    await user.click(screen.getByRole('button', { name: /^Add \d+ stacks?$/ }))
     await user.click(await screen.findByRole('button', { name: /^Continue$/ }))
 
     // 2 harnesses × 1 model × 1 task × 1 rep
