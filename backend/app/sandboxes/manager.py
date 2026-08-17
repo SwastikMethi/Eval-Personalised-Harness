@@ -32,7 +32,12 @@ log = logging.getLogger(__name__)
 
 RUN_LABEL = "aso.run_id"
 SANDBOX_UID = 1000
-PROXY_PORT = 8005
+# The relay listens here, forwards here, and queue.py builds the agent's proxy
+# URL from the same setting. Hardcoding 8005 while queue.py read backend_port
+# meant a backend on any other port handed the agent a URL the relay was not
+# listening on — and if something else held 8005, the agent reached THAT server
+# and got `401 invalid or expired run token` instead of a connection error.
+PROXY_PORT = settings.backend_port
 
 # A container on an `internal: true` network has no default route AT ALL —
 # not to the internet and not to the host gateway either, so

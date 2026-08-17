@@ -6,6 +6,7 @@ token budgets, spend ceiling, token expiry (renewable), and records a
 ModelRequestMetric per request. Secrets are never logged or echoed.
 """
 
+import asyncio
 import logging
 import secrets
 import time
@@ -237,49 +238,89 @@ class ChatRequest(BaseModel):
     response_format: dict[str, Any] | None = None
 
 
+# A harness has no retry of its own: one 5xx anywhere in a twenty-step run ends
+# the run. Measured against nvidia/nemotron-3-ultra-550b-a55b, which returns a
+# sub-second 503 for roughly one request in seven — reproduced with a plain
+# direct call, so it is the provider's, not ours. At that rate an unretried run
+# has almost no chance of finishing, and the result would be recorded against
+# the harness rather than the provider.
+#
+# Only errors the provider itself marked retryable. Rate limiting is excluded
+# on purpose: it keeps its own 429 path so the queue can back off, and retrying
+# inline would spend quota fighting a limit that needs waiting out.
+PROVIDER_RETRY_ATTEMPTS = 2
+PROVIDER_RETRY_BACKOFF_S = (1.0, 3.0)
+
+
+def _retryable(exc: ProviderError) -> bool:
+    return exc.retryable and exc.category in (
+        ErrorCategory.MODEL_PROVIDER,
+        ErrorCategory.TIMEOUT,
+    )
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(
     body: ChatRequest, authorization: str = Header(default="")
 ) -> dict[str, Any]:
     entry = _authorize(authorization, body.model)
-    start = time.monotonic()
-    try:
-        result = await provider_for(entry.provider).complete(
-            body.model,
-            body.messages,
-            temperature=body.temperature,
-            max_tokens=body.max_tokens,
-            tools=body.tools,
-            tool_choice=body.tool_choice,
-            response_format=body.response_format,
-        )
-    except ProviderError as exc:
-        latency = int((time.monotonic() - start) * 1000)
-        _record_metric(entry, latency, None, exc.status or 502, {"error": str(exc)})
-        # Refund the request: the agent got nothing it could use, and charging
-        # for it means a model behind a flaky gateway is given fewer steps than
-        # one on a healthy provider — our infrastructure changing the
-        # measurement. Measured: deepseek-v4 lost 2 of 8 steps to 504s.
-        # The refund is bounded elsewhere and cannot become free spend: the
-        # metric row above is already written, the spend and token ceilings are
-        # untouched, and provider errors are retried a capped number of times.
-        entry.requests = max(0, entry.requests - 1)
-        if exc.category is ErrorCategory.RATE_LIMITED:
-            # Remembered on the run token so the orchestrator can distinguish
-            # "provider throttled us" from "the harness broke" after the fact,
-            # without parsing harness error strings.
-            entry.rate_limited = True
-            raise HTTPException(429, f"provider error [{exc.category}]: {exc}") from exc
-        if exc.category is ErrorCategory.MODEL_PROVIDER:
-            # Every provider rejection, not only the retryable ones. A 404
-            # ("model not enabled for this account") carried no marker at all,
-            # so it fell through to HARNESS — booking the provider's refusal
-            # against whichever harness happened to be running, in the very
-            # statistic this product exists to produce.
-            entry.provider_error = True
-            entry.provider_error_retryable = exc.retryable
-            entry.provider_error_detail = f"{exc.status or 502} after {latency}ms"
-        raise HTTPException(502, f"provider error [{exc.category}]: {exc}") from exc
+    for attempt in range(PROVIDER_RETRY_ATTEMPTS + 1):
+        start = time.monotonic()
+        try:
+            result = await provider_for(entry.provider).complete(
+                body.model,
+                body.messages,
+                temperature=body.temperature,
+                max_tokens=body.max_tokens,
+                tools=body.tools,
+                tool_choice=body.tool_choice,
+                response_format=body.response_format,
+            )
+            break
+        except ProviderError as exc:
+            latency = int((time.monotonic() - start) * 1000)
+            # Written for every attempt, including ones a retry goes on to
+            # recover. Hiding the failures would understate exactly the
+            # provider flakiness this product is supposed to measure.
+            _record_metric(entry, latency, None, exc.status or 502, {"error": str(exc)})
+            if _retryable(exc) and attempt < PROVIDER_RETRY_ATTEMPTS:
+                log.warning(
+                    "proxy retrying provider error",
+                    extra={
+                        "run_id": entry.run_id,
+                        "model_id": body.model,
+                        "event_type": "model_request_retry",
+                        "attempt": attempt + 1,
+                    },
+                )
+                await asyncio.sleep(PROVIDER_RETRY_BACKOFF_S[attempt])
+                continue
+            # Refund the request: the agent got nothing it could use, and
+            # charging for it means a model behind a flaky gateway is given
+            # fewer steps than one on a healthy provider — our infrastructure
+            # changing the measurement. Measured: deepseek-v4 lost 2 of 8 steps
+            # to 504s. The refund is bounded elsewhere and cannot become free
+            # spend: the metric rows above are already written and the spend and
+            # token ceilings are untouched. It happens only once, here on the
+            # give-up path, so a call that a retry rescues still counts as the
+            # one request the agent actually made.
+            entry.requests = max(0, entry.requests - 1)
+            if exc.category is ErrorCategory.RATE_LIMITED:
+                # Remembered on the run token so the orchestrator can distinguish
+                # "provider throttled us" from "the harness broke" after the fact,
+                # without parsing harness error strings.
+                entry.rate_limited = True
+                raise HTTPException(429, f"provider error [{exc.category}]: {exc}") from exc
+            if exc.category is ErrorCategory.MODEL_PROVIDER:
+                # Every provider rejection, not only the retryable ones. A 404
+                # ("model not enabled for this account") carried no marker at all,
+                # so it fell through to HARNESS — booking the provider's refusal
+                # against whichever harness happened to be running, in the very
+                # statistic this product exists to produce.
+                entry.provider_error = True
+                entry.provider_error_retryable = exc.retryable
+                entry.provider_error_detail = f"{exc.status or 502} after {latency}ms"
+            raise HTTPException(502, f"provider error [{exc.category}]: {exc}") from exc
     latency = int((time.monotonic() - start) * 1000)
 
     if result.usage.input_tokens:

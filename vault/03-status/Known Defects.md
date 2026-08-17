@@ -1,7 +1,7 @@
 ---
 tags: [aso/status, aso/defect]
 status: current
-updated: 2026-08-15
+updated: 2026-08-17
 ---
 
 # Known Defects
@@ -220,6 +220,22 @@ So for uv and npm repos the cache was not merely useless: a full `make setup` bu
 `run_baseline` returned `benchmarkable=False` the moment the prebuilt install failed, without attempting the suite. That reported `make: not found` — a gap in **our** sandbox image — as "this repository cannot be scored", and threw away stdlib-only or vendored repos whose tests pass with no install at all.
 
 Now `missing_tool()` names the executable from the exit-127 output, the step carries a `diagnosis` the UI renders, and `warn` is set instead of halting. A suite that genuinely cannot run still yields no signal, so this degrades rather than papers over.
+
+## 22. The relay's port was hardcoded while the agent's was configurable 🔴 ✅ FIXED (2026-08-17)
+
+`sandboxes/manager.py` set `PROXY_PORT = 8005` as a literal, but `queue.py` built the agent's proxy URL from `settings.backend_port`. The relay therefore listened on 8005 and forwarded to 8005 no matter what the backend was actually bound to.
+
+A backend on any other port hands the sealed agent a URL nothing is listening on. Worse is the case measured here: a *second* backend already held 8005, so the agent's requests reached that server instead, which had never issued the run's token and answered `401 invalid or expired run token`. The run failed in 32 s having made zero model requests, and the error was categorised `harness`.
+
+`PROXY_PORT` now derives from `settings.backend_port`, so the relay's listen port, its destination, and the agent's URL cannot disagree.
+
+## 23. The proxy documented a retry it did not have 🔴 ✅ FIXED (2026-08-17)
+
+The refund comment in `api/proxy.py` ended "…and provider errors are retried a capped number of times." No retry existed anywhere — not in the proxy, not in `openai_compat`, not in `openrouter`. `provider_error_retryable` was recorded on the run token and never read.
+
+This is only invisible while providers behave. Measured against `nvidia/nemotron-3-ultra-550b-a55b`: a sub-second **503** on roughly one request in seven, reproduced with a plain direct call carrying no proxy and no harness, so it is the provider's. Neither harness retries, so the first 503 ends the run — two consecutive runs died at request 8 and request 2 — and at that rate a twenty-step run has almost no chance of finishing. The failure was then booked against the harness, corrupting the one statistic this product exists to produce.
+
+Now capped at 2 retries with 1 s / 3 s backoff, and only for errors the provider itself flagged retryable. `RATE_LIMITED` is deliberately excluded: it keeps its own 429 path so the queue can back off, and retrying inline would spend quota fighting a limit that needs waiting out. Every attempt still writes its own `ModelRequestMetric` row, including ones a retry recovers — hiding them would understate exactly the provider flakiness being measured. The refund moved to the give-up path so a call a retry rescues still counts as the one request the agent made.
 
 ---
 

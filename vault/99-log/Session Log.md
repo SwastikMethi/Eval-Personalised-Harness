@@ -1,7 +1,7 @@
 ---
 tags: [aso/log]
 status: current
-updated: 2026-08-15
+updated: 2026-08-17
 ---
 
 # Session Log
@@ -9,6 +9,20 @@ updated: 2026-08-15
 Append-only. Newest first. One entry per meaningful chunk of work. Index: [[00 Index]].
 
 Keep entries short: **what changed · why · what it unblocks · what to verify.**
+
+---
+
+## 2026-08-17 — Two defects between us and a live smolagents result
+
+**What.** Fixed [[Known Defects]] #22 (relay port hardcoded to 8005 while the agent's URL came from `settings.backend_port`) and #23 (the proxy documented a capped retry that did not exist). Four tests in `test_proxy_retry.py`; two of them confirmed failing with `PROVIDER_RETRY_ATTEMPTS = 0`.
+
+**Why.** Both surfaced while trying to answer the outstanding question — does smolagents now produce a scoreable answer? Neither is about smolagents. The port mismatch made a sealed agent reach whichever backend held 8005 and collect `401 invalid or expired run token`. The missing retry let a single upstream 503 end a run.
+
+**Measured, not assumed.** `nvidia/nemotron-3-ultra-550b-a55b` returns a sub-second 503 for roughly one request in seven — reproduced with a plain direct call carrying no proxy and no harness. Two consecutive runs died at request 8 and request 2. It is also very slow when it does answer: one observed call took **251 s** and emitted **5,348 output tokens**, because the model writes its reasoning as content.
+
+**What it unblocks.** A smolagents run can now survive provider flakiness long enough to reach an answer, which is the precondition for the comparison the product exists to make.
+
+**Still open.** Whether smolagents scores above zero. Also unfixed and reported: `manifest_hash` excludes the base image, so rebuilding the base does not invalidate prepared images; and nothing checks `aso-sandbox-python:dev` exists before a run needs it.
 
 ---
 
