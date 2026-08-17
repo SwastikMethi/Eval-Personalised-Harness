@@ -414,7 +414,14 @@ export function useWizard() {
   const sortedModels = useMemo(() => {
     const q = modelFilter.trim().toLowerCase()
     const all = availableModels.data ?? []
-    return q ? all.filter((m) => m.model_id.toLowerCase().includes(q)) : all
+    if (!q) return all
+    // Match the display name too. The list shows both, so filtering on the id
+    // alone made a search for the name the user can see return nothing.
+    return all.filter(
+      (m) =>
+        m.model_id.toLowerCase().includes(q) ||
+        (m.display_name ?? '').toLowerCase().includes(q),
+    )
   }, [availableModels.data, modelFilter])
 
   const baselineLabel = runBaseline.isPending

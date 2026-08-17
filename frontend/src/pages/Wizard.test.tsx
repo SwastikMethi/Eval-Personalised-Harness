@@ -229,6 +229,46 @@ describe('Agent stacks are chosen pairs, not a grid', () => {
     expect(await screen.findByText('1 agent stack')).toBeInTheDocument()
   })
 
+  it('keeps focus in the model filter while you type', async () => {
+    // The dialog autofocused its first control on every render, and the
+    // caller passes an inline onClose whose identity changes each time — so
+    // one keystroke re-ran the effect and threw focus onto the `fake` harness
+    // checkbox. You could type exactly one character.
+    mockRepo()
+    const user = await reachCombos()
+    await openPicker(user)
+
+    const filter = await screen.findByLabelText('filter')
+    await user.click(filter)
+    await user.keyboard('north')
+
+    expect(filter).toHaveValue('north')
+    expect(filter).toHaveFocus()
+  })
+
+  it('filters the model list by what was typed', async () => {
+    mockRepo()
+    const user = await reachCombos()
+    await openPicker(user)
+
+    expect(await screen.findByLabelText(/gpt-oss-20b/)).toBeInTheDocument()
+    await user.type(await screen.findByLabelText('filter'), 'north')
+
+    expect(screen.queryByLabelText(/gpt-oss-20b/)).not.toBeInTheDocument()
+    expect(await screen.findByLabelText(/north-mini-code/)).toBeInTheDocument()
+  })
+
+  it('finds a model by the display name the list shows', async () => {
+    // The row reads "cohere/north-mini-code:free" with display name
+    // "north-mini-code"; filtering on the id alone missed name-only searches.
+    mockRepo()
+    const user = await reachCombos()
+    await openPicker(user)
+    await user.type(await screen.findByLabelText('filter'), 'gpt-oss-20b')
+
+    expect(await screen.findByLabelText(/gpt-oss-20b/)).toBeInTheDocument()
+  })
+
   it('does not add the same stack twice', async () => {
     mockRepo()
     const user = await reachCombos()

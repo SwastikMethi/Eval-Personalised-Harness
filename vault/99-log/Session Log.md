@@ -415,4 +415,22 @@ Agent Stacks ticked harnesses in one list and models in another and silently mul
 
 ---
 
+## 2026-08-17 — The model filter accepted exactly one character
+
+Reported as "the search bar for models is not working fine" on Agent Stacks. The filter logic was correct; the bug was in the `Dialog` primitive.
+
+`Dialog`'s effect autofocused its first control and depended on `[open, onClose]`. Callers pass an inline arrow — `StepStacks` builds `close` fresh each render — so the identity changed on every render, the effect re-ran, and **line 1188 pulled focus back to the dialog's first control on every keystroke**. Typing one character into the filter updated `modelFilter`, which re-rendered the tree, which stole focus onto the `fake` harness checkbox. Further keys went there, and a space would have toggled it.
+
+Split into two effects: autofocus keyed on `open` alone, because focusing belongs to *opening* and nothing else; and the Escape/Tab trap reading the latest `onClose` through a ref so the listener never needs re-binding. The focus trap added in the UI rebuild is preserved intact.
+
+This lived in the primitive, so it would have hit any input in any dialog. The picker is simply the only dialog today.
+
+Also widened `sortedModels` to match `display_name` as well as `model_id` — the list shows both, so searching for the name a user can see returned nothing.
+
+**Verify:** the regression test was confirmed to fail against the old dependency array before being kept (`toHaveValue('north')` failed, one character in). 49 frontend tests pass, build/tsc/oxlint green. Checked in a browser: typed `nemotron` in full, focus stayed in the field, list narrowed to the 8 matching variants.
+
+**Test gap that allowed it:** every existing dialog test only ever clicked checkboxes. Nothing had typed inside a dialog, so nothing could have caught this.
+
+---
+
 <!-- New entries above this line -->

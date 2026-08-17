@@ -1180,15 +1180,30 @@ export function Dialog({
   const ref = useRef<HTMLDivElement>(null)
   const titleId = useId()
 
-  // Escape closes, and focus is trapped inside — both are behaviours MUI used
-  // to provide and that a hand-rolled dialog silently loses.
+  // The latest onClose, read by the key handler without being a dependency of
+  // it. Callers pass an inline arrow, so its identity changes on every render;
+  // depending on it re-ran the whole effect — including the autofocus below —
+  // on every keystroke, which yanked focus out of any field you were typing in
+  // and into the dialog's first control.
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
+
+  // Autofocus belongs to OPENING, and nothing else. Keyed on `open` alone.
+  useEffect(() => {
+    if (!open) return
+    ref.current
+      ?.querySelector<HTMLElement>('button, [href], input, select, textarea')
+      ?.focus()
+  }, [open])
+
+  // Escape closes and Tab is trapped inside — behaviours MUI provided and a
+  // hand-rolled dialog silently loses. Bound once per open, never re-bound.
   useEffect(() => {
     if (!open) return
     const node = ref.current
-    node?.querySelector<HTMLElement>('button, [href], input, select, textarea')?.focus()
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') return onClose()
+      if (e.key === 'Escape') return closeRef.current()
       if (e.key !== 'Tab' || !node) return
       const items = [
         ...node.querySelectorAll<HTMLElement>(
@@ -1208,7 +1223,7 @@ export function Dialog({
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [open, onClose])
+  }, [open])
 
   if (!open) return null
   return (
