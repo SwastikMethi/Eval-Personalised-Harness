@@ -1,8 +1,6 @@
-import { useQuery } from '@tanstack/react-query'
-import { api } from '../../api'
 import { color, space } from '../../design/tokens'
 import { font, type } from '../../design/typography'
-import { Button, Check, Field, Metric, Notice, Panel, Row, ScreenTitle, StepItem, Steps } from '../../ui'
+import { Button, Field, Metric, Notice, Panel, Row, ScreenTitle, StepItem, Steps } from '../../ui'
 import SetupPanel from './SetupPanel'
 import { DAILY_FREE_REQUESTS, type Wizard } from './useWizard'
 
@@ -14,19 +12,7 @@ import { DAILY_FREE_REQUESTS, type Wizard } from './useWizard'
  * visible together.
  */
 export default function StepReview({ w }: { w: Wizard }) {
-  // The backend already computes this expansion. Showing its answer rather than
-  // ours means the number on screen is the number that will be queued.
-  const preview = useQuery({
-    queryKey: ['preview', w.taskIds, w.stacks, w.reps],
-    queryFn: () =>
-      api.preview({
-        task_ids: w.taskIds,
-        combinations: w.stacks,
-        repetitions: w.reps,
-      }),
-    enabled: w.taskIds.length > 0 && w.stacks.length > 0,
-    retry: false,
-  })
+  const preview = w.preview
 
   return (
     <>
@@ -60,41 +46,15 @@ export default function StepReview({ w }: { w: Wizard }) {
               value={w.reps}
               onChange={(v) => w.setReps(Math.max(1, Number(v)))}
             />
-            <Field
-              label="requests / run"
-              type="number"
-              min={1}
-              disabled={w.uncapped}
-              value={w.budget}
-              onChange={(v) => w.setBudget(Math.max(1, Number(v)))}
-            />
-            <Field
-              label="steps / run"
-              type="number"
-              min={1}
-              value={w.steps}
-              onChange={(v) => w.setSteps(Math.max(1, Number(v)))}
-            />
           </div>
 
-          <Check
-            checked={w.uncapped}
-            disabled={w.anyFreeTier}
-            onChange={w.setUncapped}
-            label={
-              <span style={{ ...type.bodySm, color: color.dim }}>
-                no request limit — stop when the agent finishes
-              </span>
-            }
-          />
-          <div style={{ ...type.caption, color: color.faint, margin: `4px 0 ${space[4]}px` }}>
-            {w.anyFreeTier
-              ? 'unavailable while any stack is on a free tier: one uncapped run would spend the daily quota'
-              : w.uncapped
-                ? 'bounded by the token ceiling and the 30-minute timeout instead. A run that ' +
-                  'times out having produced a patch is still graded.'
-                : 'measured: one agent spent all 100 requests and 3.0M input tokens without ' +
-                  'ever deciding it was done'}
+          {/* No request cap. A request count never bounded spend anyway —
+              100 calls cost anywhere from 100k to 3M tokens depending on how
+              much history the harness resends — so the run is bounded by the
+              30-minute timeout and the token ceiling instead. */}
+          <div style={{ ...type.caption, color: color.faint, margin: `0 0 ${space[4]}px` }}>
+            bounded by the 30-minute timeout and the token ceiling; the agent stops when it is
+            finished rather than when an allowance runs out
           </div>
 
           <table style={{ width: '100%', borderCollapse: 'collapse', marginBottom: space[4] }}>
@@ -102,7 +62,7 @@ export default function StepReview({ w }: { w: Wizard }) {
               {(
                 [
                   ['stacks', w.stacks.length],
-                  ['tasks', w.taskIds.length],
+                  [w.sharedGroups > 0 ? 'task groups' : 'tasks', w.taskGroups],
                   ['repetitions', w.reps],
                 ] as const
               ).map(([k, v]) => (
@@ -142,12 +102,16 @@ export default function StepReview({ w }: { w: Wizard }) {
             }}
           >
             <Metric label="total runs" value={w.runs} tone={w.runs ? 'live' : undefined} />
-            <Metric
-              label="model requests"
-              value={w.requests}
-              tone={w.overDailyCap ? 'warn' : 'pass'}
-              sub={`free tier ≈ ${DAILY_FREE_REQUESTS}/day`}
-            />
+            {w.cappedStacks.length > 0 ? (
+              <Metric
+                label="openrouter requests"
+                value={`~${w.requests}`}
+                tone={w.overDailyCap ? 'warn' : 'pass'}
+                sub={`free tier ≈ ${DAILY_FREE_REQUESTS}/day`}
+              />
+            ) : (
+              <Metric label="daily quota" value="n/a" sub="no free-tier stack" />
+            )}
           </div>
 
           {/* Server-side expansion. If it ever disagrees with the arithmetic
@@ -179,9 +143,11 @@ export default function StepReview({ w }: { w: Wizard }) {
           {w.overDailyCap && (
             <div style={{ marginTop: space[3] }}>
               <Notice tone="warn">
-                This needs {w.requests} requests — more than a free-tier day. Runs that hit the
-                limit are parked as rate-limited and resume automatically, so the matrix takes
-                longer rather than failing.
+                {w.cappedStacks.length} of your {w.stacks.length} stack
+                {w.stacks.length === 1 ? '' : 's'} run on OpenRouter, whose free tier allows
+                roughly {DAILY_FREE_REQUESTS} requests a day; this looks like about {w.requests}.
+                Runs that hit the limit are parked and resume automatically, so the matrix takes
+                longer rather than failing. Stacks on other providers are not subject to it.
               </Notice>
             </div>
           )}

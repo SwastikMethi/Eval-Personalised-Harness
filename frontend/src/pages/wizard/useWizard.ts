@@ -101,7 +101,16 @@ export function useWizard() {
   // max_model_requests and max_steps, which meant you could not bound spend
   // without also bounding how much work the agent was allowed to attempt.
   const [budget, setBudget] = useState(8)
-  const [steps, setSteps] = useState(50)
+  // Still sent, no longer offered as a control.
+  //
+  // It only ever reached smolagents (`ASO_MAX_STEPS` → `CodeAgent`).
+  // mini-SWE-agent runs as `mini -y -m … --exit-immediately` with no step
+  // limit, and giving it one means overriding its config file — which also
+  // carries its prompt templates, so replacing it would change the agent's
+  // behaviour and break comparability with every earlier run. A control that
+  // silently does nothing for the harness you are using is worse than no
+  // control, so the field is gone and this stays a config-level default.
+  const [steps] = useState(50)
   // Uncapped lets the agent stop when it is finished rather than when it runs
   // out of allowance. Safe because a run that times out having produced a patch
   // is still graded — but only sensible where tokens, not a daily request
@@ -132,6 +141,7 @@ export function useWizard() {
     queryFn: () => api.commits(repoId!),
     enabled: Boolean(repoId),
   })
+
 
   const fail = (e: unknown) => setError(e instanceof Error ? e.message : String(e))
 
@@ -305,6 +315,24 @@ export function useWizard() {
   const theoryOnly =
     taskIds.length > 0 && selectedShas.length === 0 && describedTaskIds.length === 0
 
+  /**
+   * The server's own expansion of the matrix.
+   *
+   * It lives here rather than on the Review screen because the run count and
+   * the request projection are derived from it, and those are read on more
+   * than one screen. It also groups tasks exactly as creation does, so the
+   * number shown is the number that will be queued.
+   */
+  const preview = useQuery({
+    queryKey: ['preview', taskIds, stacks, reps],
+    queryFn: () =>
+      api.preview({ task_ids: taskIds, combinations: stacks, repetitions: reps }),
+    enabled: taskIds.length > 0 && stacks.length > 0,
+    retry: false,
+  })
+  const previewGroups = preview.data?.task_groups
+  const previewShared = preview.data?.shared_groups
+
   /** Ask for the shortlist as soon as the user reaches the task step. One
    *  request, reused by the setup panel on the next step — the model reads the
    *  repository once, not once per thing we want from it. */
@@ -398,9 +426,30 @@ export function useWizard() {
     if (needsAttention) setSetupOpen(true)
   }, [needsAttention])
 
-  const runs = stacks.length * taskIds.length * reps
-  const requests = runs * budget
-  const overDailyCap = requests > DAILY_FREE_REQUESTS
+  // Tasks that read the same snapshot share one run, so the run count follows
+  // GROUPS, not tasks. The server decides the grouping; until its preview
+  // answers, assume none so the estimate never promises fewer runs than will
+  // actually be queued.
+  const taskGroups = previewGroups ?? taskIds.length
+  const sharedGroups = previewShared ?? 0
+  const runs = stacks.length * taskGroups * reps
+  /**
+   * The daily cap belongs to OpenRouter, not to the tool.
+   *
+   * NVIDIA NIM bills credits and has no per-day request limit, so projecting
+   * one across the whole matrix warned an all-NIM run about a rule that does
+   * not apply to it. Only OpenRouter stacks are counted.
+   */
+  const freeTierProviders = new Set(
+    (providers.data ?? []).filter((p) => p.has_free_tier).map((p) => p.name),
+  )
+  const cappedStacks = stacks.filter((s) => freeTierProviders.has(s.provider))
+  const cappedRuns = cappedStacks.length * taskGroups * reps
+  // No per-run cap any more, so this is an estimate from what runs actually
+  // cost rather than an allowance: the median measured run made ~14 requests.
+  const TYPICAL_REQUESTS_PER_RUN = 14
+  const requests = cappedRuns * TYPICAL_REQUESTS_PER_RUN
+  const overDailyCap = cappedStacks.length > 0 && requests > DAILY_FREE_REQUESTS
 
   const blockers: string[] = []
   if (taskIds.length === 0) blockers.push('pick at least one task')
@@ -525,7 +574,6 @@ export function useWizard() {
     budget,
     setBudget,
     steps,
-    setSteps,
     uncapped,
     setUncapped,
     setupOpen,
@@ -569,6 +617,10 @@ export function useWizard() {
     runs,
     requests,
     overDailyCap,
+    taskGroups,
+    sharedGroups,
+    cappedStacks,
+    preview,
     blockers,
     sortedModels,
     baselineLabel,

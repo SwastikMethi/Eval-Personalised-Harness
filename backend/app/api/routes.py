@@ -158,11 +158,14 @@ class PreviewIn(BaseModel):
 
 
 @router.post("/experiments/preview")
-def preview_matrix(body: PreviewIn) -> dict[str, Any]:
+def preview_matrix(
+    body: PreviewIn, session: Session = Depends(get_session)
+) -> dict[str, Any]:
     """Expanded run count before committing (spec §13: show expected runs).
 
-    Also reports the model-request ceiling, because on a free tier the
-    binding constraint is requests per day, not wall-clock.
+    Groups tasks exactly as `create_experiment` does. Counting raw tasks here
+    would report a number the server was not about to queue — the very
+    disagreement showing this figure was meant to catch.
     """
     explicit = body.combinations is not None
     if explicit:
@@ -173,20 +176,33 @@ def preview_matrix(body: PreviewIn) -> dict[str, Any]:
         harnesses, models = len(body.harnesses), len(body.model_ids)
         combos = harnesses * models
 
-    runs = combos * len(body.task_ids) * body.repetitions
+    tasks = [t for tid in body.task_ids if (t := session.get(BenchmarkTask, tid))]
+    # Unknown ids cannot be grouped, so fall back to counting them: better an
+    # over-estimate than a preview that quietly ignores a task.
+    groups = group_tasks(tasks) if len(tasks) == len(body.task_ids) else []
+    group_count = len(groups) if groups else len(body.task_ids)
+    shared = sum(1 for g in groups if len(g) > 1)
+
+    runs = combos * group_count * body.repetitions
+    unit = "task group" if shared else "task"
+    plural = "" if group_count == 1 else "s"
     expression = (
-        f"{combos} stack{'' if combos == 1 else 's'} × {len(body.task_ids)} tasks × "
+        f"{combos} stack{'' if combos == 1 else 's'} × {group_count} {unit}{plural} × "
         f"{body.repetitions} reps = {runs} runs"
         if explicit
         else (
             f"{harnesses} harnesses × {models} models × "
-            f"{len(body.task_ids)} tasks × {body.repetitions} reps = {runs} runs"
+            f"{group_count} {unit}{plural} × {body.repetitions} reps = {runs} runs"
         )
     )
     return {
         "harnesses": harnesses,
         "models": models,
         "tasks": len(body.task_ids),
+        "task_groups": group_count,
+        # How many groups hold more than one task, so the UI can say why the
+        # run count is lower than the task count without recomputing it.
+        "shared_groups": shared,
         "repetitions": body.repetitions,
         "combinations": combos,
         "runs": runs,

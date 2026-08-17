@@ -176,6 +176,10 @@ export interface MatrixPreview {
   combinations: number
   runs: number
   expression: string
+  /** Tasks collapse into groups when they share a repository snapshot. */
+  task_groups?: number
+  /** How many of those groups hold more than one task. */
+  shared_groups?: number
 }
 
 export interface RunRow {

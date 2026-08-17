@@ -433,4 +433,28 @@ Also widened `sortedModels` to match `display_name` as well as `model_id` — th
 
 ---
 
+## 2026-08-17 — smolagents was never graded on what it produced; runs now group by snapshot
+
+Two changes, in the order they had to happen.
+
+**smolagents had never produced a scoreable answer.** Every evaluation in the database was 0.0, and two of the runs completed cleanly. Not a model result — the task prompt baked `write ANSWER.md` in at creation time (`tasks_api.py:128`), which is mini-SWE-agent's shell convention, fixed before any harness is known. A smolagents `CodeAgent` exits by calling `final_answer()`. One run reported *"Successfully wrote comprehensive analysis to ANSWER.md"*, spent 12k output tokens, returned a 497-character summary and produced a **zero-length patch**.
+
+The plumbing was eliminated first, with no model calls: under real container conditions (uid 1000, bind-mounted `/workspace`) a `LocalPythonExecutor` with `pathlib` authorized writes the file, and `git add -A && git diff --cached` captures it. Same command mini-SWE-agent uses. So the agent never wrote it — it was asked for the wrong thing.
+
+Delivery moved out of the stored prompt and into the adapters: `DELIVER_AS_FILE` for a shell loop, `DELIVER_AS_FINAL_ANSWER` for a CodeAgent, appended only for comprehension tasks. `HarnessRunRequest.task_kind` carries the distinction. What stays shared is the part that shapes quality — read the repository, cite files, invent nothing.
+
+**Runs group by snapshot.** 3 stacks × 2 comprehension tasks was 6 runs; both tasks read HEAD, so six containers cloned the same repo and re-explored the same code. `snapshot_key.py` mirrors `_prepare_workspace`'s branching so grouping and workspace construction cannot disagree. Commit replays split — no tree is both "before A" and "before B".
+
+`EvaluationResult.task_id` is the load-bearing part: without it two answers from one run collapse into one score and the per-task normalisation at `aggregate.py:137` files both under the group's first task. Autogenerate proposed `task_ids` as NOT NULL with no default, which cannot apply to a populated table; corrected, and existing rows backfilled. **Verified against a copy of the real database — 23 combinations, 15 evaluations, none left empty.**
+
+Cost is shared across a group, not duplicated: two answers in 500s report 250s each, or a grouped run would look twice as expensive and distort efficiency.
+
+**Also:** the per-run request cap is gone from the UI — the proxy's own comment already argued a request count never bounded spend. The ~50/day projection is now scoped to OpenRouter stacks, since NIM bills credits and was being warned about a rule it is not subject to. And the "steps / run" field was **removed**: it only ever reached smolagents, and giving mini-SWE-agent a step limit means overriding the config file that also holds its prompt templates, which would change agent behaviour and break comparability with every earlier run.
+
+**Verify:** ruff ✅ · mypy ✅ · **402 backend** (was 381) · **50 frontend** (was 46) · build/tsc/oxlint green.
+
+**Not yet done:** no live run has confirmed smolagents now scores non-zero. That is the real acceptance test and it is still outstanding.
+
+---
+
 <!-- New entries above this line -->

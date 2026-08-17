@@ -393,10 +393,37 @@ describe('Setup wizard', () => {
     await user.clear(reps)
     await user.type(reps, '9')
 
-    // 1 × 1 × 1 × 9 runs × 8 requests = 72 > ~50/day
+    // 9 runs on an OpenRouter stack comfortably exceeds ~50 requests a day.
     await waitFor(async () =>
-      expect(await screen.findByText(/more than a free-tier day/)).toBeInTheDocument(),
+      expect(await screen.findByText(/free tier allows/)).toBeInTheDocument(),
     )
+  })
+
+  it('does not warn about a daily quota that does not apply', async () => {
+    // The ~50/day cap is OpenRouter's. NVIDIA NIM bills credits and has no
+    // per-day request limit, so an all-NIM matrix was being warned about a
+    // rule it is not subject to.
+    mockRepo()
+    const { NIM_MODELS, OPENROUTER_MODELS } = await import('../test/server')
+    server.use(
+      http.get('/api/v1/providers/:provider/models', ({ params }) =>
+        HttpResponse.json(params.provider === 'nvidia' ? NIM_MODELS : OPENROUTER_MODELS),
+      ),
+    )
+    const user = await reachCombos()
+    await openPicker(user)
+    await user.click(await screen.findByRole('button', { name: /nvidia/ }))
+    await user.click(await screen.findByLabelText(/mini-swe-agent/))
+    await user.click(await screen.findByLabelText(/deepseek-coder/))
+    await user.click(screen.getByRole('button', { name: /^Add 1 stack$/ }))
+    await user.click(await screen.findByRole('button', { name: /^Continue$/ }))
+
+    const reps = await screen.findByLabelText('repetitions')
+    await user.clear(reps)
+    await user.type(reps, '9')
+
+    expect(await screen.findByText('n/a')).toBeInTheDocument()
+    expect(screen.queryByText(/free tier allows/)).not.toBeInTheDocument()
   })
 
   it('surfaces a clone failure instead of claiming there are no commits', async () => {
