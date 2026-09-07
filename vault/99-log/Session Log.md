@@ -12,6 +12,37 @@ Keep entries short: **what changed · why · what it unblocks · what to verify.
 
 ---
 
+## 2026-09-07 — A/B with median-of-3: the effect is below the noise floor
+
+Re-ran the A/B with the median-of-3 now in the grading path, applied to both arms — 8 answers × 2 arms × 3 samples, 48 judge calls, read-only.
+
+| run | chars | rec | OFF | ± | ON | ± | delta |
+|---|---|---|---|---|---|---|---|
+| `140415db` | 13,377 | 0.25 | 0.83 | 0.08 | 0.83 | **0.58** | +0.00 |
+| `4215cbab` | 281 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | +0.00 |
+| `cf4df358` | 54 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | +0.00 |
+| `6e837ea4` | 1,069 | 0.33 | 0.25 | 0.00 | 0.33 | 0.00 | +0.08 |
+| `2c3c761d` | 8,457 | 0.92 | 0.92 | 0.17 | 0.92 | 0.25 | +0.00 |
+| `d3de1516` | 12,709 | 0.67 | 0.67 | 0.17 | 0.58 | 0.08 | −0.08 |
+| `d3de1516` | 12,709 | 0.67 | 0.58 | 0.17 | 0.92 | 0.08 | **+0.33** |
+| `056bb647` | 5,132 | 0.50 | 0.58 | 0.08 | 0.08 | 0.08 | **−0.50** |
+
+**Mean delta −0.021. Within-arm spread: mean 0.109, max 0.58.**
+
+**The spread is five times the effect.** There is no measurable systematic effect of grounding at this sample size, and no honest way to claim one.
+
+**This also corrects the previous two entries.** I wrote that the judge was stable and the 0.25 "unexplained" after thirteen consecutive 0.83s on one answer. Wrong — that was an unlucky sample. Widen to eight answers and the variance appears immediately, **±0.58 on that very run's ON arm**, exactly the magnitude of the original 0.25-vs-0.83 gap. The 0.25 was judge variance all along; I simply failed to reproduce it and drew a conclusion from that failure rather than from a measurement.
+
+**Median-of-3 is not enough.** It shipped, it is still right — a lone outlier no longer decides a grade — but it does not make a single cell trustworthy. Against σ≈0.11 the standard error at three samples is ~0.06, which cannot resolve a 0.02 effect. Doing so would need tens of samples per cell, which is not worth buying.
+
+**What did hold, again:** the controls. The 54- and 281-character answers scored 0.00 in both arms with **zero spread**. Grounding does not inflate a thin answer, across two independent runs of this experiment.
+
+**Where that leaves grounding.** It stays, on the argument rather than the measurement: a judge holding the source *can* catch a fabricated claim, a judge holding only paths cannot, and the controls show it costs nothing on empty answers. But **no measured improvement can be claimed**, and the two large opposite-sign movements (−0.50 and +0.33, both with tight within-arm spread) are unexplained.
+
+**The real conclusion is about the product, not the feature.** A per-cell score from one repetition is not a measurement. `aggregate.py` already flags anything under three repetitions as `statistically_weak` — this says that flag should be believed, and that comparing two stacks on single runs, which is what every result so far has done, is not sound.
+
+---
+
 ## 2026-09-07 — The judge keeps gpt-5.6-sol; the grade stops being one draw
 
 **Decision.** Grading stays on gpt-5.6-sol. Dropping to gpt-4.1 would buy reproducibility by giving up the better judge, and a weaker grader is a worse instrument even if its number repeats.
