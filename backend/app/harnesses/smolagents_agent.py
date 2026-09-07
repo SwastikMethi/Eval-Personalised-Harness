@@ -71,13 +71,36 @@ try:
     )
     result = agent.run(task, return_full_result=True)
     steps = list(getattr(result, "steps", None) or [])
+
+    # `result.output` is populated ONLY by final_answer(). A model that writes
+    # its answer as ordinary step prose and never makes that call returns an
+    # empty string here, and the whole run scores zero having done the work:
+    # measured on gpt-oss-120b, exit 0, 19 steps, 21,146 output tokens, a
+    # complete answer sitting in the step log, final_message empty.
+    #
+    # So fall back to the last step that produced text. Flagged, never
+    # silently: a salvaged answer is not the agent's declared answer, and the
+    # record has to say which one was graded.
+    answer = str(getattr(result, "output", "") or "")
+    salvaged = False
+    if not answer.strip():
+        for step in reversed(steps):
+            for attr in ("model_output", "action_output", "observations"):
+                text = str(getattr(step, attr, "") or "")
+                if text.strip():
+                    answer, salvaged = text, True
+                    break
+            if salvaged:
+                break
+
     out = {
         "status": "completed",
         # Was 4000, which silently cost a comprehension answer its marks: a run
         # came back at exactly 3,996 characters — cut off mid-thought by this
         # cap, then graded as if that was all the agent had to say. A final
         # message is an ANSWER channel, not a log line.
-        "final_message": str(getattr(result, "output", "") or "")[:60000],
+        "final_message": answer[:60000],
+        "answer_salvaged": salvaged,
         "steps": len(steps),
         "tool_calls": sum(1 for s in steps if getattr(s, "tool_calls", None)),
     }
@@ -197,6 +220,10 @@ class SmolagentsHarness(HarnessAdapter):
             raw_metadata={
                 "exit_code": result.exit_code,
                 "truncated": result.truncated,
+                # True when final_answer() was never called and the answer came
+                # from the last step instead. It still gets graded — the agent
+                # did the work — but a reader must be able to tell the two apart.
+                "answer_salvaged": bool(report.get("answer_salvaged")),
                 "traceback": report.get("traceback"),
                 "stdout_tail": result.stdout[-2000:],
                 # smolagents logs its reasoning to stderr, so stdout alone left

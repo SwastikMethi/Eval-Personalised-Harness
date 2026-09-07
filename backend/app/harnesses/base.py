@@ -72,6 +72,15 @@ DELIVER_AS_FILE = (
     "without it. If for any reason you cannot write the file, put the complete "
     "answer in your final message instead. An empty or one-line ending is a "
     "failed attempt, however much you learned along the way."
+    # …and then say so. Without this the instruction only ever forbids
+    # finishing and never releases that constraint, so an agent that had
+    # already done the job kept going: one run wrote a complete ANSWER.md
+    # early, explored for roughly 120 more steps, and was killed at 6,030,328
+    # input tokens by the ceiling. There is nothing left to find once the
+    # answer is written.
+    "\n\nAs soon as ANSWER.md is written, submit and end the run. Do not keep "
+    "exploring, re-reading files, or revising — the task is complete at that "
+    "point, and continuing costs budget without improving the answer."
 )
 
 DELIVER_AS_FINAL_ANSWER = (

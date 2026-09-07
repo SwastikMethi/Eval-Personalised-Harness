@@ -1,7 +1,7 @@
 ---
 tags: [aso/status, aso/defect]
 status: current
-updated: 2026-08-17
+updated: 2026-08-18
 ---
 
 # Known Defects
@@ -236,6 +236,80 @@ The refund comment in `api/proxy.py` ended "…and provider errors are retried a
 This is only invisible while providers behave. Measured against `nvidia/nemotron-3-ultra-550b-a55b`: a sub-second **503** on roughly one request in seven, reproduced with a plain direct call carrying no proxy and no harness, so it is the provider's. Neither harness retries, so the first 503 ends the run — two consecutive runs died at request 8 and request 2 — and at that rate a twenty-step run has almost no chance of finishing. The failure was then booked against the harness, corrupting the one statistic this product exists to produce.
 
 Now capped at 2 retries with 1 s / 3 s backoff, and only for errors the provider itself flagged retryable. `RATE_LIMITED` is deliberately excluded: it keeps its own 429 path so the queue can back off, and retrying inline would spend quota fighting a limit that needs waiting out. Every attempt still writes its own `ModelRequestMetric` row, including ones a retry recovers — hiding them would understate exactly the provider flakiness being measured. The refund moved to the give-up path so a call a retry rescues still counts as the one request the agent made.
+
+## 24. A grouped run showed one task's grade, and the wrong one 🔴 ✅ FIXED (2026-08-18)
+
+A run answers every task that shared its snapshot, judging the **same** answer against each rubric — one `EvaluationResult` per task (`queue.py:709-714`). `run_detail` took `.first()` of those ordered `created_at desc`, so the panel showed a **single** grade with nothing on screen naming which question it belonged to, and because of the ordering it was the **last** task while the run's own score came from `verdicts[0]`, the first. The panel could therefore disagree with the Results table about the same run. At the reported working shape — 3 stacks × 2 tasks — every run hit this.
+
+Fixed by reusing the newest-per-task rule `results_api.py:48-51` already applies, rather than inventing a second one, so the two surfaces cannot drift. Plain ascending order would have traded this bug for its mirror image: a re-evaluation writes a second row for the same task (real examples exist 1 h 43 m apart) and ascending would have returned the stale one.
+
+`run_detail` now returns an `evaluations` array carrying each verdict with its task title, ordered to match the group; the scalar `evaluation` is kept for existing callers and now means the group's first task.
+
+## 25. The agent's answer was never rendered anywhere 🟠 ✅ FIXED (2026-08-18)
+
+For a comprehension task the written answer **is** the deliverable, and `run_detail` had been shipping it as `result.final_message` all along. No screen read that field. The default tab was `Patch`, so a run that produced a 5,132-character graded answer displayed *"No patch produced. That is a legitimate benchmark result"* — true about the patch, and actively misleading about the run. Reading the answer meant opening SQLite.
+
+The tab is now `Output` and renders whichever the run produced: the diff for a commit task, the answer for a theory task, and the empty state only when there is genuinely neither. Rendered as wrapped monospace rather than parsed markdown — the repo carries no markdown dependency and this did not justify adding one.
+
+Two smaller things fixed alongside, both consequences of [[Known Defects]] #23: the `error` on a model request was in the payload and typed in `api.ts` but never displayed, so a `503` rendered as a bare number; and `_reconcile_usage` counts **attempts**, so a retried call inflates `requests`. The count is now labelled `attempts, incl. retries` rather than quietly redefined, with an `upstream · n failed` chip and a note that a recovered call appears as several rows.
+
+## 26. A request cap outlived its control and killed a healthy run 🔴 ✅ FIXED (2026-08-18)
+
+`useWizard.ts` kept `const [budget, setBudget] = useState(8)` feeding `max_model_requests` after the control that set it was removed. Nothing rendered `setBudget` or `setUncapped` any more, so **every run launched from the UI was hard-capped at 8 model requests with no way to change it**. The commit that removed the control claimed "the UI simply never sets one" — it did, at 8.
+
+Caught by a live run, not by reading code. `smolagents × openai/gpt-oss-120b` made **8 clean calls in 191 s, zero errors**, and was killed one request short of an answer with `budget_exceeded`. It was the healthiest of three stacks that day.
+
+The bias is the part worth remembering: **a request cap only ever bites fast stacks.** A slow model times out long before reaching 8 and never feels it, so the cap was quietly penalising exactly the stacks this product exists to find. Same class of error as [[Known Defects]] #18 — inferring a model's quality from a limit of ours.
+
+Now `max_model_requests: null` unconditionally. `null` rather than omission is load-bearing: the backend applies its own default of 8 whenever the key is **absent** (`queue.py:53`), so removing the field would have changed nothing. Spend stays bounded by the 30-minute timeout and the input-token ceiling — the proxy's own argument, that a request count says almost nothing about cost, applies here too. Pinned by `Wizard.test.tsx::launches with no per-run request cap`, confirmed failing against `max_model_requests: 8`.
+
+The backend default of 8 is left in place for direct API callers under [[ADR-003 Free Tier Constraints]].
+
+## 27. smolagents discards everything when interrupted 🟠 ✅ PARTLY FIXED (2026-09-07)
+
+A `CodeAgent` holds its answer in memory and emits it only through `final_answer()`. The runner's `except` path sets `error_type`, `error_message` and `traceback` but **never `final_message`**, and on timeout the process is SIGKILLed (exit 124) before it writes its output file at all. So any interruption yields a zero-length answer no matter how much the agent explored.
+
+Measured on `smolagents × nemotron-3-ultra-550b-a55b`: 6 requests, 119,678 input and 42,275 output tokens, **0 characters of answer**, both grouped tasks scored 0.0. mini-SWE-agent does not have this failure mode because it files `ANSWER.md` to disk as it goes, so a partial answer survives the kill.
+
+Salvaging the last step's output would be legitimate rather than score inflation — `effort` already exists to distinguish "explored nothing" from "explored plenty and we threw it away" — but it is a change to what gets graded and wants its own decision.
+
+**Fixed for the clean-exit case (2026-09-07).** The runner now falls back to the last step that produced text when `result.output` is empty, trying `model_output`, `action_output`, then `observations`. Flagged rather than silent: `answer_salvaged` rides in `harness_meta`, because a salvaged answer is not the agent's declared answer and the record has to say which one was graded. Three tests execute the real RUNNER source against a stub `smolagents` — declared answer preferred, last step salvaged, and an agent that genuinely produced nothing still scores nothing.
+
+**Still open: the SIGKILL case.** On timeout the process dies before writing its output file at all, so there is nothing to fall back to. Salvaging that needs the runner to checkpoint as it goes, which is a larger change.
+
+## 30. The judge graded plausibility, not correctness 🔴 ✅ FIXED (2026-09-07)
+
+The rubric author read only manifests and the file tree — `build_digest` gates content on `_is_manifest(name) or in_ci`, so **no source is ever read** — and the judge received the tree, the rubric and the answer, also with no source. Between them they could confirm that an answer covered the rubric's topics and named files that exist. Neither could tell a correct trace from a confident wrong one, and correctness carries **50% of the ranking weight**.
+
+Concretely: a criterion asked for *"exactly when paralysis, burn, and poison checks occur relative to attacks and end-of-turn"* — written about `battle_mechanics.py` by a model that never opened it, and graded by a model that never opened it either.
+
+Now `digest.read_evidence(root, paths)` reads the source behind each criterion's cited path and `judge_answer` passes it through. Deliberately in `digest.py`: that module owns the rule about what may leave the machine, and this is a real widening of it — grading needs the module that implements a call order, not a README. Still bounded (6,000 chars per file, 30,000 total) and still secret-safe: resolved inside the repo root so a crafted path cannot escape, and refused for anything matching `SECRET_PATTERNS`. `build_digest` is unchanged, so setup analysis still sees only manifests.
+
+The system prompt now instructs that a claim contradicting the source is `missed` however well it reads, and that a criterion whose file is absent is judged on coverage as before. `evaluation_results` records `evidence_files`, so a coverage-only score is distinguishable from a checked one rather than both reading as a bare number.
+
+**Not claimed:** this does not make the judge infallible. It replaces "sounds plausible" with "consistent with the source it was shown", which is a different and much better measurement — but the judge is still a model, and still not deterministic (Known Defect #17).
+
+**Widened 2026-08-18.** Not only on interruption. A `smolagents × gpt-oss-120b` run exited **cleanly** — `exit_code: 0`, `status: completed`, 19 steps, 321,263 input and 21,146 output tokens — with `final_message` empty. Its stdout tail holds a full, substantive answer written as step prose. `result.output` is populated only by `final_answer()`, so an agent that answers without making that call returns nothing at all. Both models tried so far miss the call: the 550B could not emit parseable Python, gpt-oss-120b simply narrated instead. Three smolagents runs, three zero scores, and in at least two the answer demonstrably existed.
+
+## 28. Nothing told a shell agent it could stop 🔴 ✅ FIXED (2026-08-18)
+
+`DELIVER_AS_FILE` said write `ANSWER.md` and *"do not finish without it"* — a negative constraint that was never released. mini-SWE-agent runs `--exit-immediately` and stops the moment the model submits, so the agent was willing to stop and was never told to.
+
+Measured: `mini-swe-agent × nemotron-3-ultra-550b` wrote a complete **1,866-character `ANSWER.md`** — the only file in its patch, answering both grouped questions with `file:line` citations — then explored for roughly 120 more steps and was killed at **6,030,328 input tokens** by the ceiling. 126 requests, of which the useful work was over long before.
+
+The instruction now closes: once `ANSWER.md` exists, submit and end the run. `DELIVER_AS_FINAL_ANSWER` never had this gap, because `final_answer()` *is* smolagents' exit.
+
+This is why the 6M ceiling was **not** lowered in the same change. It was never the operative bound — it was the backstop that caught a run which should have stopped itself, and tuning it would have hidden the actual defect.
+
+## 29. The budget watchdog never graded a comprehension run 🔴 ✅ FIXED (2026-08-18)
+
+`_end_budget_run` called only `_evaluate`, gated on `patch_produced`. A theory task has no `base_commit` and no fixture, so `_evaluate` returned `no_evaluation_configured` and the run recorded no score — while the answer sat in the extracted patch, which `judge.resolve_answer` reads *first* via `answer_from_patch`.
+
+So the run above finished **COMPLETED with no grade at all**, and read as a success only because the agent happened to leave a file behind. Two grouped questions, 28 minutes, 6M tokens, zero verdicts.
+
+Now branches on `task_kind` exactly as the normal path does (`queue.py:698`): `_judge` per grouped task for theory, `_evaluate` for commit. Effort is recorded with `agent_steps` and `commands_executed` **null** — the harness never returned, so those are unknown rather than zero.
+
+Residual, deliberately left: the watchdog still decides COMPLETED vs FAILED from `patch_produced`, so a theory run that answers in its final message and writes no file will carry a real score while reading FAILED.
 
 ---
 

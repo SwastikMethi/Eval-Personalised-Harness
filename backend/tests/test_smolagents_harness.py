@@ -216,3 +216,96 @@ async def test_steps_are_not_reported_as_model_requests(tmp_path: Path) -> None:
 
     assert result.model_requests is None
     assert result.agent_steps == 4
+
+
+# --- the runner's own answer salvage -----------------------------------------
+#
+# This logic lives in the RUNNER source string and normally only ever executes
+# inside the container, so it is exercised here against a stub `smolagents`
+# rather than only through the adapter.
+
+
+class _Step:
+    def __init__(self, model_output: str = "", observations: str = "") -> None:
+        self.model_output = model_output
+        self.observations = observations
+        self.tool_calls = None
+
+
+def _run_runner(tmp_path: Path, output: str, steps: list[Any]) -> dict[str, Any]:
+    """Execute the real RUNNER source with smolagents stubbed out."""
+    import os
+    import sys
+    import types
+
+    from app.harnesses.smolagents_agent import RUNNER
+
+    class _Result:
+        def __init__(self) -> None:
+            self.output = output
+            self.steps = steps
+            self.token_usage = None
+
+    class _Agent:
+        def __init__(self, **kwargs: Any) -> None: ...
+
+        def run(self, task: str, return_full_result: bool = False) -> _Result:
+            return _Result()
+
+    stub = types.ModuleType("smolagents")
+    stub.CodeAgent = _Agent  # type: ignore[attr-defined]
+    stub.OpenAIServerModel = lambda **kw: None  # type: ignore[attr-defined]
+
+    task_file = tmp_path / "task.txt"
+    task_file.write_text("question")
+    out_file = tmp_path / "out.json"
+    env = {
+        "ASO_TASK_FILE": str(task_file),
+        "ASO_MODEL": "m",
+        "OPENAI_BASE_URL": "http://relay/proxy/v1",
+        "OPENAI_API_KEY": "tok",
+        "ASO_IMPORTS": "[]",
+        "ASO_OUT": str(out_file),
+    }
+    previous = sys.modules.get("smolagents")
+    sys.modules["smolagents"] = stub
+    os.environ.update(env)
+    try:
+        exec(compile(RUNNER, "<runner>", "exec"), {"__name__": "__main__"})
+    finally:
+        if previous is None:
+            sys.modules.pop("smolagents", None)
+        else:
+            sys.modules["smolagents"] = previous
+        for key in env:
+            os.environ.pop(key, None)
+    return json.loads(out_file.read_text())  # type: ignore[no-any-return]
+
+
+def test_final_answer_is_used_when_the_agent_calls_it(tmp_path: Path) -> None:
+    report = _run_runner(tmp_path, "the declared answer", [_Step("some working")])
+    assert report["final_message"] == "the declared answer"
+    assert report["answer_salvaged"] is False
+
+
+def test_the_last_step_is_salvaged_when_final_answer_was_never_called(
+    tmp_path: Path,
+) -> None:
+    """Measured: gpt-oss-120b, exit 0, 19 steps, 21,146 output tokens, a complete
+    answer sitting in the step log and `result.output` empty — the run scored
+    zero having done the work. `result.output` is filled only by final_answer().
+    """
+    report = _run_runner(
+        tmp_path,
+        "",
+        [_Step("early exploration"), _Step("# Answer\nThe server starts in src/server.py.")],
+    )
+    assert "src/server.py" in report["final_message"], "the answer must survive"
+    assert report["answer_salvaged"] is True, "and be marked as not the declared answer"
+
+
+def test_nothing_to_salvage_stays_empty(tmp_path: Path) -> None:
+    """An agent that genuinely produced nothing must not be handed an answer."""
+    report = _run_runner(tmp_path, "", [_Step("", "")])
+    assert report["final_message"] == ""
+    assert report["answer_salvaged"] is False

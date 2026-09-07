@@ -39,6 +39,11 @@ Reply with ONE JSON object and nothing else:
 
 Rules:
 - Judge ONLY against the rubric criteria you are given. Do not invent new ones.
+- When SOURCE OF CITED FILES is present, check the answer's claims against it.
+  A claim that contradicts the source is "missed", however confidently it is
+  written and however well it reads. Plausibility is not correctness.
+- Where a criterion's file is not included, judge that criterion on coverage as
+  before, and do not penalise the answer for the omission.
 - "met" — the answer states the fact. Different wording is fine; a vague gesture
   in the right direction is not.
 - "partial" — the answer gets a substantive part of the criterion right and the
@@ -117,12 +122,24 @@ def resolve_answer(patch: str | None, final_message: str | None) -> tuple[str | 
 
 
 def build_messages(
-    question: str, rubric: list[dict[str, Any]], answer: str, tree: list[str]
+    question: str,
+    rubric: list[dict[str, Any]],
+    answer: str,
+    tree: list[str],
+    evidence: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     criteria = "\n".join(
         f"{i + 1}. {c.get('criterion', '')}  [evidence: {c.get('evidence', '')}]"
         for i, c in enumerate(rubric)
     )
+    # The source of the files the rubric cites. Without it the judge holds only
+    # paths, so it can confirm an answer covers the right topics and names real
+    # files while having no way to tell a correct trace from a confident wrong
+    # one. Optional so a repo that cannot be read still grades as it used to.
+    source = ""
+    if evidence:
+        blocks = "\n\n".join(f"--- {path} ---\n{text}" for path, text in evidence.items())
+        source = f"\nSOURCE OF CITED FILES:\n{blocks}\n"
     return [
         {"role": "system", "content": SYSTEM},
         {
@@ -131,7 +148,8 @@ def build_messages(
             "content": (
                 f"QUESTION ASKED:\n{question}\n\n"
                 f"RUBRIC:\n{criteria}\n\n"
-                f"REAL FILE TREE ({len(tree)} paths):\n" + "\n".join(tree[:400]) + "\n\n"
+                f"REAL FILE TREE ({len(tree)} paths):\n" + "\n".join(tree[:400]) + "\n"
+                f"{source}\n"
                 f"ANSWER TO GRADE:\n{answer[:24000]}"
             ),
         },
@@ -277,6 +295,7 @@ async def judge_answer(
     rubric: list[dict[str, Any]],
     answer: str | None,
     tree: list[str],
+    evidence: dict[str, str] | None = None,
 ) -> Verdict:
     """Score one answer. Never raises: a judging failure is recorded, not fatal."""
     if not answer:
@@ -287,7 +306,7 @@ async def judge_answer(
     try:
         result = await provider.complete(
             model_id,
-            build_messages(question, rubric, answer, tree),
+            build_messages(question, rubric, answer, tree, evidence),
             temperature=0.0,
             max_tokens=4000,
         )

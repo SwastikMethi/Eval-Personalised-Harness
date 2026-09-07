@@ -1,7 +1,7 @@
 ---
 tags: [aso/log]
 status: current
-updated: 2026-08-17
+updated: 2026-08-18
 ---
 
 # Session Log
@@ -9,6 +9,74 @@ updated: 2026-08-17
 Append-only. Newest first. One entry per meaningful chunk of work. Index: [[00 Index]].
 
 Keep entries short: **what changed · why · what it unblocks · what to verify.**
+
+---
+
+## 2026-09-07 — Grading correctness instead of plausibility
+
+**What.** Fixed [[Known Defects]] #30 (the judge graded plausibility) and the clean-exit half of #27 (smolagents discarded answers it had written).
+
+**#30 — the judge now reads the cited source.** New `digest.read_evidence(root, paths)` returns the contents of the files each rubric criterion cites; `judge_answer` passes them through and the system prompt says a claim contradicting the source is `missed` however well it reads. Put in `digest.py` on purpose — that module owns what may leave the machine, and this widens it: grading needs the module implementing a call order, not a README. Bounded at 6,000 chars per file and 30,000 total, resolved inside the repo root, and refused for `SECRET_PATTERNS`. `build_digest` is untouched, so setup analysis still sees manifests only.
+
+`evaluation_results` now carries `evidence_files`, so a coverage-only score is distinguishable from a checked one.
+
+**#27 — the runner salvages its last step.** `result.output` is filled only by `final_answer()`; a model that answers in step prose returned nothing. Measured on gpt-oss-120b: exit 0, 19 steps, 21,146 output tokens, a complete answer in the log, score 0. Now falls back to the last step with text, flagged as `answer_salvaged` in `harness_meta` — a salvaged answer is not the declared answer. The SIGKILL-on-timeout case stays open: nothing is written to fall back to.
+
+**Verified.** Three tests execute the real RUNNER source against a stub `smolagents`; the evidence tests cover the secret refusal, the path-traversal guard and the size cap. New tests confirmed non-passing against the previous code.
+
+**Found while recapping:** a run on 2026-08-18 05:16 UTC, after the previous session's fixes went live, is the first clean matrix — smolagents × nemotron-550b **0.92**, mini-swe-agent × gpt-oss-120b **0.33**, mini-swe-agent × gpt-oss-20b **0.00**, all COMPLETED. Those scores predate #30, so they measure coverage, not correctness.
+
+---
+
+## 2026-08-18 — "Budget spent", and the agent that had already finished
+
+**What.** Fixed [[Known Defects]] #28 (nothing told a shell agent it could stop) and #29 (the budget watchdog never graded a comprehension run). Widened #27 with new evidence.
+
+**The question was "why budget spent".** Three answers, and the interesting one is not about budgets. One run predated the cap removal and still carried `max_model_requests: 8`. The next carried `null` — the cap really is gone — and tripped the **6M input-token ceiling** instead: 126 requests, 6,030,328 input against 47,682 output.
+
+**But it had already finished.** The salvaged patch touches one file, `ANSWER.md`, holding a complete 1,866-character answer with `file:line` citations for both grouped questions. The agent did the work early and then explored for ~120 more steps, because `DELIVER_AS_FILE` forbade finishing without the file and never said what to do once it existed. mini-SWE-agent runs `--exit-immediately`; it was willing to stop.
+
+**And the answer was thrown away.** `_end_budget_run` only ever called `_evaluate`, which needs a base commit or a fixture. A theory task has neither, so it returned `no_evaluation_configured` — while `judge.resolve_answer` would have read that same patch first.
+
+**The ceiling was deliberately left at 6M.** It is the backstop that caught a run which should have stopped itself. Lowering it would have tuned around the defect.
+
+**Verified.** 15 tests across `test_answer_delivery.py` and `test_budget_stall.py`; the three new ones confirmed failing against the previous code, the commit-path guard passing either way.
+
+**Also found, unfixed.** A `smolagents × gpt-oss-120b` run exited cleanly — exit 0, 19 steps — with an empty `final_message` and a full answer sitting in its step output. `result.output` comes only from `final_answer()`. Recorded on #27.
+
+---
+
+## 2026-08-18 — A three-stack run, and what it caught
+
+**What.** Tracked a live 3-stack × 2-task run. All three produced no answer, for three unrelated reasons, and one of them was ours. Removed the leftover request cap ([[Known Defects]] #26) and recorded #27.
+
+**The run.** Grouped correctly into **3 runs, not 6**, and the per-task verdicts written by this session's work appeared in production — two verdicts per run.
+
+| stack | outcome | why |
+|---|---|---|
+| smolagents × nemotron-3-ultra-550b | TIMED_OUT | model output would not parse as Python; ~302 s gateway ceiling |
+| mini-swe-agent × nemotron-3.5-lightning | FAILED | OpenRouter free-model daily quota exhausted, 30 × 429 |
+| smolagents × gpt-oss-120b | FAILED | **our own 8-request cap**, 8 clean calls, zero errors |
+
+**Two provider facts, measured.** NVIDIA's gateway cuts generation at **~302–303 s** — four samples inside 1.4 s of each other (302,053→200; 302,404, 303,062, 303,435→504). And the 550B writes 6k–13k output tokens per call, so it straddles that wall rather than crossing it cleanly. The [[Known Defects]] #23 retry rescued it twice, which is the first live proof that fix works — but a rescue costs ~5 min, and the run timed out regardless.
+
+**Why smolagents produced nothing.** Not the harness being broken — it scored 0.5 the day before on the same model. The 550B kept emitting prose and ASCII diagrams where a `CodeAgent` requires executable Python (`Code parsing failed on line 197: SyntaxError`), burning steps until the timeout. Compounded by #27: an interrupted CodeAgent discards everything.
+
+**Verified.** 58 frontend tests (+1), typecheck and lint clean. The new test was confirmed failing against `max_model_requests: 8`. Backend untouched this round.
+
+---
+
+## 2026-08-18 — The run reaches the screen
+
+**What.** Fixed [[Known Defects]] #24 (a grouped run showed one task's grade, and the wrong one) and #25 (the agent's answer was never rendered). `run_detail` returns an `evaluations` array with task titles; `RunPanel`'s first tab is now `Output`, showing a diff or an answer as the run dictates; the `Model calls` table shows why a request failed and says that rows are attempts.
+
+**Why.** The previous day's run scored 0.5 on a 5,132-character answer that could only be read by opening SQLite. The pipeline worked; the screens did not show what it produced.
+
+**Reuse over reinvention.** The per-task collation is the newest-per-task rule `results_api.py:48-51` already used, so the run panel and the results table cannot drift. Ascending order would have swapped the bug for its mirror: a re-evaluation's stale row winning.
+
+**Verified.** 408 backend (+2) and 57 frontend (+7) tests. Every new test confirmed failing against the previous code first — 6 of the 7 frontend ones did, the seventh being a deliberate regression guard on diff rendering. Then against the real completed run: `evaluations` carries the task title, `answer_source=final_message`, 5,132 chars, 1 met / 4 partial / 1 missing / 0 invented; and against a run that really 503'd, the error text and `1 of 8 failed` both present.
+
+**Not verified in a browser.** The dev proxy is hardcoded to 8005 (`vite.config.ts:10`) and the main backend holds that port; the payload and the rendering were checked separately rather than end to end through a live page.
 
 ---
 

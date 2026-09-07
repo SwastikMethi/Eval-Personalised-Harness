@@ -185,3 +185,126 @@ async def test_ending_a_stalled_run_reports_budget_not_timeout() -> None:
         assert run.error_category == ErrorCategory.BUDGET_EXCEEDED
         assert RunState(run.state) is not RunState.TIMED_OUT
     proxy.revoke_run_token(run_id)
+
+
+def _make_theory_run(titles: tuple[str, ...]) -> tuple[str, list[str]]:
+    """A RUNNING run over several grouped comprehension tasks."""
+    from app.models import BenchmarkTask, Experiment, ExperimentCombination, Repository
+
+    with SessionLocal() as session:
+        repo = Repository(name="bt", source="local", path_or_url="/tmp/bt")
+        session.add(repo)
+        session.flush()
+        tasks = [
+            BenchmarkTask(repository_id=repo.id, kind="theory", title=t, prompt="p")
+            for t in titles
+        ]
+        exp = Experiment(repository_id=repo.id, name="bt")
+        session.add_all([*tasks, exp])
+        session.flush()
+        combo = ExperimentCombination(
+            experiment_id=exp.id,
+            task_id=tasks[0].id,
+            task_ids=[t.id for t in tasks],
+            harness="fake",
+            provider="fake",
+            model_id=MODEL,
+        )
+        session.add(combo)
+        session.flush()
+        run = BenchmarkRun(
+            combination_id=combo.id, repetition=1, state=RunState.RUNNING,
+            idempotency_key=f"{combo.id}:1",
+        )
+        session.add(run)
+        session.commit()
+        return run.id, [t.id for t in tasks]
+
+
+async def test_a_budget_ended_comprehension_run_is_graded_by_rubric(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The watchdog only ever called `_evaluate`, which needs a base commit or a
+    fixture. A theory task has neither, so it returned `no_evaluation_configured`
+    and the answer sitting in the extracted patch was discarded unscored.
+
+    Measured: a run whose patch was a complete 1,866-character ANSWER.md
+    finished COMPLETED carrying no grade at all, after 28 minutes of work.
+    """
+    from app.models import EvaluationResult
+
+    run_id, task_ids = _make_theory_run(("first question", "second question"))
+    proxy.issue_run_token(run_id, MODEL, max_requests=1)
+    proxy._active_tokens[run_id].requests = 1
+    metric_at(run_id, datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=600))
+
+    answer = (
+        "diff --git a/ANSWER.md b/ANSWER.md\n"
+        "--- /dev/null\n+++ b/ANSWER.md\n"
+        "@@\n+# Answer\n+The server starts in src/server.py.\n"
+    )
+    w = QueueWorker(SessionLocal, proxy_base_url="http://test/proxy",
+                    sandbox_manager=SandboxWithPatch(answer))
+
+    seen: list[tuple[str, str | None]] = []
+
+    async def fake_judge(self, rid, tid, patch, final_message, effort=None):  # type: ignore[no-untyped-def]
+        # The answer must reach the judge from the PATCH: the harness never
+        # returned, so there is no final message to fall back on.
+        seen.append((tid, patch))
+        with SessionLocal() as session:
+            session.add(
+                EvaluationResult(run_id=rid, task_id=tid, signal="ok", score=0.5, results={})
+            )
+            session.commit()
+        return {"signal": "ok", "score": 0.5}
+
+    monkeypatch.setattr(QueueWorker, "_judge", fake_judge)
+    # If the theory branch is skipped this fires instead, and the assertions below fail.
+    monkeypatch.setattr(
+        QueueWorker, "_evaluate",
+        lambda *a, **k: {"signal": "no_evaluation_configured", "score": None},
+    )
+
+    await w._end_budget_run(run_id)
+
+    assert [tid for tid, _ in seen] == task_ids, "one verdict per grouped task"
+    assert all("ANSWER.md" in (p or "") for _, p in seen), "graded on the salvaged answer"
+
+    with SessionLocal() as session:
+        run = session.get(BenchmarkRun, run_id)
+        assert run is not None
+        assert run.result["score"] == 0.5
+        assert run.result["evaluation_signal"] == "ok"
+        rows = session.query(EvaluationResult).filter_by(run_id=run_id).all()
+        assert len(rows) == 2, "both questions scored, not just the group's first"
+    proxy.revoke_run_token(run_id)
+
+
+async def test_a_budget_ended_commit_run_still_uses_the_suite(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The rubric branch must not swallow ordinary replays."""
+    run_id = _make_run(RunState.RUNNING)  # kind="user_defined", not theory
+    proxy.issue_run_token(run_id, MODEL, max_requests=1)
+    proxy._active_tokens[run_id].requests = 1
+    metric_at(run_id, datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=600))
+
+    w = QueueWorker(SessionLocal, proxy_base_url="http://test/proxy",
+                    sandbox_manager=SandboxWithPatch("diff --git a/app.py b/app.py\n+fixed\n"))
+    called = {"judge": False, "evaluate": False}
+
+    async def fake_judge(self, *a, **k):  # type: ignore[no-untyped-def]
+        called["judge"] = True
+        return {"signal": "ok", "score": 1.0}
+
+    def fake_evaluate(*a, **k):  # type: ignore[no-untyped-def]
+        called["evaluate"] = True
+        return {"signal": "ok", "score": 0.75}
+
+    monkeypatch.setattr(QueueWorker, "_judge", fake_judge)
+    monkeypatch.setattr(QueueWorker, "_evaluate", fake_evaluate)
+
+    await w._end_budget_run(run_id)
+
+    assert called["evaluate"] and not called["judge"]
+    with SessionLocal() as session:
+        run = session.get(BenchmarkRun, run_id)
+        assert run is not None and run.result["score"] == 0.75
+    proxy.revoke_run_token(run_id)

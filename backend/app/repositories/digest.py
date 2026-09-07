@@ -58,6 +58,13 @@ MAX_README_CHARS = 4000
 MAX_TOTAL_CHARS = 24_000
 MAX_COMMITS = 25
 
+# Grading reads the cited source, which is a bigger per-file budget than setup
+# analysis needs: a criterion about a call order is only checkable against the
+# function itself. Sized so six criteria over three or four distinct modules
+# fit alongside the answer (24k) without crowding the judge's context.
+MAX_EVIDENCE_FILE_CHARS = 6_000
+MAX_EVIDENCE_TOTAL_CHARS = 30_000
+
 
 def is_secret(name: str) -> bool:
     lowered = name.lower()
@@ -83,6 +90,40 @@ class Digest:
             parts.append("RECENT COMMITS:")
             parts += [f"{c['sha'][:8]} {c['subject']}" for c in self.commits]
         return "\n".join(parts)[:MAX_TOTAL_CHARS]
+
+
+def read_evidence(root: Path, paths: list[str]) -> dict[str, str]:
+    """Source of the files a rubric criterion cites, for grading.
+
+    Deliberately here rather than in the evaluator: this module owns the rule
+    about what may leave the machine, and grading needs a WIDER set than
+    `build_digest`'s manifest allowlist — a criterion about a call order cites
+    the module that implements it, not a README.
+
+    That widening is the point. Without it the judge sees only paths and can
+    check that an answer names real files and covers the rubric's topics, never
+    whether a single claim about those files is true.
+
+    Still bounded and still secret-safe: resolved inside `root` so a crafted
+    path cannot escape the repository, refused for anything matching
+    SECRET_PATTERNS, and capped per file and in total.
+    """
+    out: dict[str, str] = {}
+    budget = MAX_EVIDENCE_TOTAL_CHARS
+    root = root.resolve()
+    for rel in dict.fromkeys(p.strip().lstrip("./") for p in paths if p and p.strip()):
+        if budget <= 0:
+            break
+        candidate = (root / rel).resolve()
+        if not candidate.is_relative_to(root) or is_secret(candidate.name):
+            continue
+        if not candidate.is_file():
+            continue
+        content = _read(candidate, min(MAX_EVIDENCE_FILE_CHARS, budget))
+        if content:
+            out[rel] = content
+            budget -= len(content)
+    return out
 
 
 def _read(path: Path, limit: int) -> str | None:

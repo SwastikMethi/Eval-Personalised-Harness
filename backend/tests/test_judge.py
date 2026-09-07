@@ -149,6 +149,33 @@ def test_the_judge_is_never_told_who_wrote_the_answer() -> None:
         assert identity not in blob, f"{identity} leaked into the judge prompt"
 
 
+def test_cited_source_reaches_the_judge_so_claims_can_be_checked() -> None:
+    """Without this the judge holds only paths: it can confirm an answer names
+    real files and covers the rubric, and cannot tell a correct trace from a
+    confident wrong one."""
+    messages = build_messages(
+        "explain the flow",
+        RUBRIC,
+        "the entry point is src/server.py",
+        ["src/server.py"],
+        {"src/server.py": "def main():\n    return battle_simulator()"},
+    )
+    # The user message, not the whole blob: the system prompt names the section
+    # in its rules, so asserting on both together would pass either way.
+    prompt = messages[1]["content"]
+    assert "SOURCE OF CITED FILES" in prompt
+    assert "battle_simulator()" in prompt, "the source itself, not just the path"
+    # And the judge has to be told what to do with it.
+    assert "contradicts the source" in messages[0]["content"]
+
+
+def test_grading_without_source_still_works() -> None:
+    """A repo that cannot be read grades on coverage exactly as it did before."""
+    messages = build_messages("q", RUBRIC, "an answer", ["src/server.py"], {})
+    assert "SOURCE OF CITED FILES" not in messages[1]["content"]
+    assert "ANSWER TO GRADE" in messages[1]["content"]
+
+
 # --- answer resolution -------------------------------------------------------
 
 PATCH_WITH_ANSWER = (

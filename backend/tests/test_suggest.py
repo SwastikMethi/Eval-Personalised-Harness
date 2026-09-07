@@ -13,7 +13,13 @@ from pathlib import Path
 import pytest
 
 from app.providers.base import CompletionResult, CompletionUsage, ModelInfo, ModelProvider
-from app.repositories.digest import MAX_TOTAL_CHARS, build_digest, is_secret
+from app.repositories.digest import (
+    MAX_EVIDENCE_FILE_CHARS,
+    MAX_TOTAL_CHARS,
+    build_digest,
+    is_secret,
+    read_evidence,
+)
 from app.repositories.suggest import SuggestionError, parse_suggestion
 from tests.test_repo_service import make_git_repo
 
@@ -43,6 +49,36 @@ def test_secrets_never_reach_the_digest(tmp_path: Path) -> None:
     assert ".env" not in text
     assert "id_rsa" not in text
     assert "README.md" in text
+
+
+def test_evidence_reading_widens_the_allowlist_but_not_to_secrets(tmp_path: Path) -> None:
+    """Grading needs the cited SOURCE, which `build_digest` deliberately never
+    reads. That widening is the point — and it must not widen to secrets, and
+    must not follow a path out of the repository.
+    """
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "server.py").write_text("def main():\n    return battle()")
+    (tmp_path / ".env").write_text("NVIDIA_API_KEY=SUPERSECRET")
+    outside = tmp_path.parent / "outside.txt"
+    outside.write_text("NOT PART OF THE REPO")
+
+    got = read_evidence(
+        tmp_path, ["src/server.py", ".env", "../outside.txt", "does/not/exist.py"]
+    )
+
+    assert "battle()" in got["src/server.py"], "the cited source is read"
+    assert ".env" not in got and "SUPERSECRET" not in json.dumps(got)
+    assert "../outside.txt" not in got, "a path may not escape the repository"
+    assert "does/not/exist.py" not in got, "a missing path is skipped, not fatal"
+    # build_digest still refuses the same source: only grading gets it.
+    assert "battle()" not in build_digest(tmp_path).as_prompt_text()
+
+
+def test_evidence_is_bounded(tmp_path: Path) -> None:
+    """A large repo must not blow the judge's context."""
+    (tmp_path / "big.py").write_text("x" * (MAX_EVIDENCE_FILE_CHARS * 3))
+    got = read_evidence(tmp_path, ["big.py"])
+    assert len(got["big.py"]) <= MAX_EVIDENCE_FILE_CHARS
 
 
 def test_only_manifests_are_read_not_all_source(tmp_path: Path) -> None:

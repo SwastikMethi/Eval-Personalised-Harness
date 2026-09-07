@@ -379,6 +379,14 @@ class QueueWorker:
             experiment = session.get(Experiment, combo.experiment_id) if combo else None
             task_id = combo.task_id if combo else None
             config = dict(experiment.config) if experiment else {}
+            # The same group the normal path grades. Without these a budget-ended
+            # comprehension run reached `_evaluate`, which has no base commit and
+            # no fixture to work from, returned `no_evaluation_configured`, and
+            # threw the answer away — measured: a run whose extracted patch was a
+            # complete 1,866-character ANSWER.md scored nothing at all.
+            group_task_ids = list(combo.task_ids or [combo.task_id]) if combo else []
+            primary_task = session.get(BenchmarkTask, task_id) if task_id else None
+            task_kind = primary_task.kind if primary_task else None
 
         # Salvage BEFORE anything is killed: this is the agent's work.
         patch: str | None = None
@@ -399,16 +407,33 @@ class QueueWorker:
         if patch_produced:
             self._store_patch(run_id, patch or "")
         evaluation: dict[str, Any] = {"signal": None, "score": None}
-        if task_id and patch_produced:
-            # Graded on a fresh snapshot, as always — the agent's container is
-            # irrelevant to evaluation and is about to be cleaned up anyway.
-            try:
+        try:
+            if task_kind == "theory" and group_task_ids:
+                # Rubric, not test suite — the same branch the normal path takes
+                # (see `_run_one`). `resolve_answer` reads ANSWER.md straight out
+                # of the extracted patch, so the salvaged diff is a complete
+                # answer here, not merely a change to apply.
+                effort = {
+                    # The harness never returned, so its own counters are
+                    # unknown. Null, never a fabricated zero.
+                    "commands_executed": None,
+                    "agent_steps": None,
+                    "model_requests": usage.get("requests"),
+                }
+                verdicts = [
+                    await self._judge(run_id, tid, patch, None, effort=effort)
+                    for tid in group_task_ids
+                ]
+                evaluation = verdicts[0]
+            elif task_id and patch_produced:
+                # Graded on a fresh snapshot, as always — the agent's container is
+                # irrelevant to evaluation and is about to be cleaned up anyway.
                 evaluation = await asyncio.to_thread(
                     self._evaluate, run_id, task_id, patch, config
                 )
-            except Exception:  # noqa: BLE001 - a grading failure must not lose the run
-                log.exception("evaluation failed for a budget-ended run",
-                              extra={"run_id": run_id})
+        except Exception:  # noqa: BLE001 - a grading failure must not lose the run
+            log.exception("evaluation failed for a budget-ended run",
+                          extra={"run_id": run_id})
 
         with self._sessions() as session:
             run = session.get(BenchmarkRun, run_id)
@@ -924,9 +949,19 @@ class QueueWorker:
         answer, source = judge_mod.resolve_answer(patch, final_message)
 
         tree: list[str] = []
+        # The source behind each criterion's cited path. With only the tree the
+        # judge can tell that an answer names real files and covers the rubric's
+        # topics, and nothing more — a confident wrong trace grades the same as
+        # a correct one. Best-effort: a repo that cannot be read still grades on
+        # coverage exactly as it did before.
+        evidence: dict[str, str] = {}
         if repo is not None:
             try:
-                tree = digest_mod.build_digest(repo_root(repo)).tree
+                root = repo_root(repo)
+                tree = digest_mod.build_digest(root).tree
+                evidence = digest_mod.read_evidence(
+                    root, [str(c.get("evidence", "")) for c in rubric]
+                )
             except Exception:  # noqa: BLE001 - judge without the tree rather than not at all
                 log.warning("could not build a digest for judging", extra={"run_id": run_id})
 
@@ -934,7 +969,7 @@ class QueueWorker:
             analyzer = analyzer_mod.select_analyzer(cfg)
             model_id = await analyzer_mod.resolve_model(analyzer)
             verdict = await judge_mod.judge_answer(
-                analyzer.provider, model_id, question, rubric, answer, tree
+                analyzer.provider, model_id, question, rubric, answer, tree, evidence
             )
             provenance = analyzer.provenance
         except analyzer_mod.AnalyzerUnavailable as exc:
@@ -945,6 +980,10 @@ class QueueWorker:
             "judge": verdict.as_dict() | {"provenance": provenance},
             "answer_source": source,
             "answer_chars": len(answer or ""),
+            # How the score was reached: with the cited source in front of the
+            # judge, claims can be checked; with zero files it is coverage only.
+            # Two different measurements, so the record says which one this is.
+            "evidence_files": sorted(evidence),
             # How hard the agent actually looked. Without this, an answer that
             # scored zero because the agent never opened a file is
             # indistinguishable from one that read the whole repo and still got
