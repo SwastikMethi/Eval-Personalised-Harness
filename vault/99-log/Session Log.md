@@ -12,6 +12,30 @@ Keep entries short: **what changed · why · what it unblocks · what to verify.
 
 ---
 
+## 2026-09-07 — Grounding caught a confident answer inventing behaviour
+
+**The result the whole change was for.** `smolagents × nvidia/nemotron-3-ultra-550b-a55b`, same repo and same task as the gpt-oss-20b attempt. COMPLETED in 229 s, 5 calls, no 504s, a **13,379-character** answer — fluent, sectioned, with code blocks, the kind that reads as authoritative.
+
+**Score: 0.25.** 1 met, 1 partial, 4 missing.
+
+The judge's rationale, with the source in front of it:
+
+> "It **invents** most of the turn-loop, tie-breaking, attack orchestration, poison processing, and logging behavior **beyond the supplied source**, while also **contradicting** the rubric's required ownership by `src/tools/battle_simulator.py`."
+
+"Beyond the supplied source" is the judge explicitly reasoning from `evidence_files` — a sentence it could not have written before this change.
+
+The split is the point: the one **structural** claim survived (the MCP tool is registered in `src/server.py` — checkable from the tree alone), while all four **behavioural** claims failed — turn-loop ownership, speed ordering, tie-breaking, end-of-turn poison ordering. Those are exactly the claims only source can adjudicate, and exactly the ones the old judge had to take on trust.
+
+For scale: the same model scored **0.92** and **0.5** on comparable tasks before grounding.
+
+**One honest limit on the reading.** n=1, the judge is not deterministic ([[Known Defects]] #17), and it is a different task from the 0.92, so this is not a controlled before/after. What it demonstrates is the mechanism working on a real answer, not an effect size.
+
+**Worth noting:** `invented` came back **empty**. It measures names absent from the file tree, and this answer invented *behaviour*, not filenames. The rationale and the missing criteria caught it; that list structurally cannot. Not a defect — but it means `invented` is a narrower signal than its name suggests.
+
+Also: NVIDIA was far healthier than on 2026-08-18 — 5 calls at ~24 s average against ~5 minutes then, and no gateway 504s at all.
+
+---
+
 ## 2026-09-07 — Dry run: grounding engages, and two providers moved under us
 
 **Purpose.** Prove the [[Known Defects]] #30 grounding engages on a live run. `make demo` cannot: it runs the fake harness over a commit fixture and never touches the rubric path.
