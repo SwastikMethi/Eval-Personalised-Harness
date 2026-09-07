@@ -45,6 +45,20 @@ class Settings(BaseSettings):
     # key in order of preference rather than failing when one is absent.
     analyzer_provider: str = "auto"
     analyzer_model: str = ""
+    # How many times each answer is graded, with the MEDIAN kept.
+    #
+    # The gpt-5 family fixes sampling at temperature 1 and rejects an explicit
+    # value (see providers/openai_api.py), so the judge cannot be made
+    # deterministic — and it has a tail: one measured answer scored 0.25 having
+    # judged 2 of 6 criteria, then 0.83 judging 5 of 6 on five consecutive
+    # re-runs of identical input. A single draw can land on that tail and there
+    # is no way to tell from the number that it did.
+    #
+    # judge.py has said "run repetitions and compare distributions, not one
+    # number against another" since it was written; this is that, applied where
+    # the grade is produced. Costs judge_samples x the grading calls (OpenAI
+    # billed, no effect on the OpenRouter daily cap). Set 1 to opt out.
+    judge_samples: int = 3
 
     # The ceiling that bounds an uncapped run. Requests are a poor meter for
     # spend — one measured run cost 3.0M input tokens across 100 calls, because

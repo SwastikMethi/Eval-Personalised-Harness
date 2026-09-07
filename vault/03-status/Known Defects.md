@@ -26,6 +26,8 @@ Raising the probe budget (16 was enough for every gpt-5 model measured) is a one
 
 Does **not** affect repository analysis, which asks for 1200 tokens.
 
+**Tested against the judge and cleared, 2026-09-07.** The grading path was the obvious next suspect — `judge_answer` sent `max_tokens=4000`, the largest prompt we build, to a reasoning model. Measured rather than assumed: the same answer scores **0.83 at both 4,000 and 12,000**, four samples each, zero spread, responses ~2,200 characters. The judge is not being starved. The ceiling was raised to 12,000 regardless, as cheap insurance on a real class of failure — unused budget is not billed — but it fixed nothing observed, and `judge.py` says so where the constant is defined.
+
 ---
 
 ## 17. OpenAI provider sent two parameters the gpt-5 family rejects 🔴 ✅ FIXED (2026-08-14)

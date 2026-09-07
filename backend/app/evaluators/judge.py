@@ -60,6 +60,21 @@ Rules:
 
 PARTIAL_CREDIT = 0.5
 
+# On OpenAI this becomes `max_completion_tokens`, a budget a reasoning model
+# shares with its reasoning — so sizing it for the visible JSON starves the
+# answer. Known Defect #18 measured the shape: a 1,600-token request returned
+# EMPTY because reasoning consumed the whole allowance, and 6,000 fixed that
+# caller outright. A verdict here is 1-2k of JSON; the rest is headroom, and
+# unused budget is not billed.
+#
+# Precautionary, NOT a fix for anything measured. It was raised while chasing a
+# grading that scored 0.25 having judged 2 of 6 criteria, and that hypothesis
+# was then disproven: the same answer scores 0.83 at both 4,000 and 12,000, four
+# samples each, zero spread, with responses around 2,200 characters — nowhere
+# near either ceiling. Kept because #18 is a real class of failure for the
+# largest prompt we send, and unused budget is not billed.
+JUDGE_MAX_TOKENS = 12_000
+
 
 @dataclass
 class Verdict:
@@ -272,7 +287,7 @@ async def judge_diff(
                 },
             ],
             temperature=0.0,
-            max_tokens=3000,
+            max_tokens=JUDGE_MAX_TOKENS,
         )
         raw = _extract_json(result.content)
         score = raw.get("score")
@@ -308,7 +323,7 @@ async def judge_answer(
             model_id,
             build_messages(question, rubric, answer, tree, evidence),
             temperature=0.0,
-            max_tokens=4000,
+            max_tokens=JUDGE_MAX_TOKENS,
         )
         return parse_verdict(result.content, rubric)
     except SuggestionError as exc:

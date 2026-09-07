@@ -12,6 +12,30 @@ Keep entries short: **what changed · why · what it unblocks · what to verify.
 
 ---
 
+## 2026-09-07 — The judge keeps gpt-5.6-sol; the grade stops being one draw
+
+**Decision.** Grading stays on gpt-5.6-sol. Dropping to gpt-4.1 would buy reproducibility by giving up the better judge, and a weaker grader is a worse instrument even if its number repeats.
+
+**It cannot be made deterministic, and this is settled, not assumed.** `providers/openai_api.py:24` already strips `temperature` for `^(gpt-5|o[0-9])` because that family **fixes sampling at temperature 1** and rejects an explicit value. Omitting temperature yields 1, not 0. There is no setting.
+
+**A hypothesis I raised and then disproved.** I suspected [[Known Defects]] #18 — that `max_tokens=4000` becomes `max_completion_tokens` on OpenAI, is shared with reasoning, and had starved the response that judged only 2 of 6 criteria. Tested directly: the same answer scores **0.83 at both 4,000 and 12,000**, four samples each, zero spread, responses ~2,200 characters — nowhere near either ceiling. **Not the cause.** The ceiling was raised anyway, but the comment in `judge.py` now says plainly that it is precautionary and fixed nothing measured.
+
+**So the 0.25 remains unexplained.** Three candidates eliminated: temperature (thirteen samples, zero spread), token starvation (identical at both budgets), and input mismatch (every persisted field matches). One historical 0.25 against thirteen consecutive 0.83s. Something transient we have no record of.
+
+**What shipped instead — stop letting one draw decide.**
+
+`judge.py`'s docstring has said *"run repetitions and compare distributions, not one number against another"* since it was written, and the grading path never did it. Now `_judge` grades `settings.judge_samples` times (default **3**) and keeps the **median verdict** — the verdict, not a median score bolted onto someone else's breakdown, so the criteria shown are the ones that produced the score shown. Median rather than mean: a mean would report 0.64 for the measured case, a number no judge returned, and would let one tail event drag down an answer five graders scored 0.83.
+
+Every sample and the spread are recorded (`judge_samples`, `judge_spread`), so a grade that ranged 0.25–0.83 shows it rather than presenting one draw as fact. Same principle as `aggregate.py`'s `MIN_REPS_FOR_CONFIDENCE = 3`, one level down.
+
+`judge_inputs` now records the model actually used and the input sizes. When the product and a re-run disagreed by 0.58, nothing persisted could separate "different inputs" from "different answer to identical inputs"; that took an hour by hand.
+
+**Cost:** 3× grading calls — a 3-stack × 2-task matrix goes from 6 to 18. OpenAI-billed; no effect on the OpenRouter daily cap. `JUDGE_SAMPLES=1` opts out.
+
+**Verified.** Four tests in `test_judge_sampling.py`, all confirmed failing against the previous code — including `assert 0.1 == 0.5`, which is the old path taking whichever draw came first.
+
+---
+
 ## 2026-09-07 — A/B re-grade: no measurable effect, and a score that will not reproduce
 
 **Retraction first.** The previous entry read the 0.25 on run `140415db` as grounding catching a fluent answer inventing behaviour. **That reading does not survive.** Re-grading the identical answer against the identical rubric returns **0.83, five times out of five**, with met=5/missing=1 rather than the recorded met=1/partial=1/missing=4. The 0.25 is not reproducible, so it cannot support the conclusion drawn from it.

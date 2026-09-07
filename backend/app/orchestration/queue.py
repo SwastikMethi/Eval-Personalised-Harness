@@ -965,12 +965,30 @@ class QueueWorker:
             except Exception:  # noqa: BLE001 - judge without the tree rather than not at all
                 log.warning("could not build a digest for judging", extra={"run_id": run_id})
 
+        samples: list[float] = []
+        model_id = ""
         try:
             analyzer = analyzer_mod.select_analyzer(cfg)
             model_id = await analyzer_mod.resolve_model(analyzer)
-            verdict = await judge_mod.judge_answer(
-                analyzer.provider, model_id, question, rubric, answer, tree, evidence
+            # Grade several times and keep the MEDIAN. The judge cannot be made
+            # deterministic — the gpt-5 family fixes sampling at temperature 1 —
+            # and it has a tail: one answer scored 0.25 judging 2 of 6 criteria,
+            # then 0.83 judging 5 of 6 on five consecutive identical re-runs.
+            # A median discards that outlier; a mean would drag the score toward
+            # it and report a number no judge actually returned.
+            verdicts = [
+                await judge_mod.judge_answer(
+                    analyzer.provider, model_id, question, rubric, answer, tree, evidence
+                )
+                for _ in range(max(1, int(cfg.judge_samples)))
+            ]
+            scored = sorted(
+                (v for v in verdicts if v.score is not None), key=lambda v: v.score or 0.0
             )
+            # The median VERDICT, not the median score: the criteria breakdown
+            # shown has to be the one that produced the score shown.
+            verdict = scored[len(scored) // 2] if scored else verdicts[0]
+            samples = [v.score for v in scored if v.score is not None]
             provenance = analyzer.provenance
         except analyzer_mod.AnalyzerUnavailable as exc:
             verdict = judge_mod.Verdict(error=str(exc))
@@ -984,6 +1002,23 @@ class QueueWorker:
             # judge, claims can be checked; with zero files it is coverage only.
             # Two different measurements, so the record says which one this is.
             "evidence_files": sorted(evidence),
+            # Every sample, and how far apart they were. A grade that ranged
+            # 0.25 to 0.83 must show that on its face; reporting the median
+            # alone would present one draw of a noisy instrument as a fact.
+            "judge_samples": samples,
+            "judge_spread": round(max(samples) - min(samples), 4) if samples else None,
+            # What produced the verdict. When the product and a re-run
+            # disagreed by 0.58, nothing persisted could separate "different
+            # inputs" from "different answer to the same inputs", and settling
+            # it took an hour by hand.
+            "judge_inputs": {
+                "model": model_id,
+                "answer_chars": len(answer or ""),
+                "tree_entries": len(tree),
+                "evidence_files": len(evidence),
+                "evidence_chars": sum(len(v) for v in evidence.values()),
+                "rubric_criteria": len(rubric),
+            },
             # How hard the agent actually looked. Without this, an answer that
             # scored zero because the agent never opened a file is
             # indistinguishable from one that read the whole repo and still got
