@@ -593,4 +593,27 @@ describe('Setup wizard', () => {
 
     expect(await screen.findByText(/Commands changed since this baseline ran/)).toBeInTheDocument()
   })
+
+  it('launches with no per-run request cap', async () => {
+    // A leftover budget of 8 outlived the control that set it and killed a
+    // healthy run one request short of its answer. Omitting the key is NOT
+    // equivalent: the backend applies its own default of 8 when it is absent,
+    // so `null` has to be on the wire.
+    mockRepo()
+    let body: Record<string, unknown> | undefined
+    server.use(
+      http.post('/api/v1/experiments', async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json({ id: 'e1', runs: 1 })
+      }),
+    )
+
+    const user = await reachReview()
+    await user.click(await screen.findByRole('button', { name: /^Start \d+ run/ }))
+
+    await waitFor(() => expect(body).toBeDefined())
+    const config = body!.config as Record<string, unknown>
+    expect(config).toHaveProperty('max_model_requests')
+    expect(config.max_model_requests).toBeNull()
+  })
 })

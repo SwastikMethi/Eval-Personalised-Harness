@@ -97,10 +97,6 @@ export function useWizard() {
   const [draftHarnesses, setDraftHarnesses] = useState<string[]>([])
   const [draftModels, setDraftModels] = useState<string[]>([])
   const [reps, setReps] = useState(1)
-  // Two knobs, not one. They used to be the same number sent as both
-  // max_model_requests and max_steps, which meant you could not bound spend
-  // without also bounding how much work the agent was allowed to attempt.
-  const [budget, setBudget] = useState(8)
   // Still sent, no longer offered as a control.
   //
   // It only ever reached smolagents (`ASO_MAX_STEPS` → `CodeAgent`).
@@ -111,11 +107,6 @@ export function useWizard() {
   // silently does nothing for the harness you are using is worse than no
   // control, so the field is gone and this stays a config-level default.
   const [steps] = useState(50)
-  // Uncapped lets the agent stop when it is finished rather than when it runs
-  // out of allowance. Safe because a run that times out having produced a patch
-  // is still graded — but only sensible where tokens, not a daily request
-  // quota, are the constraint, so it stays off for free-tier providers.
-  const [uncapped, setUncapped] = useState(false)
   const [setupOpen, setSetupOpen] = useState(false)
   // Free-only by default: of 400+ models on OpenRouter only ~14 are free, and
   // this account has no credits, so listing the rest is 400 ways to fail.
@@ -403,9 +394,20 @@ export function useWizard() {
         combinations: stacks,
         repetitions: reps,
         config: {
-          // null is the wire form of "uncapped" — the backend only applies its
-          // default when the key is absent, so this must be sent explicitly.
-          max_model_requests: uncapped ? null : budget,
+          // Uncapped. null is the wire form, and it must be sent explicitly:
+          // the backend applies its own default of 8 whenever the key is
+          // absent, so omitting this is not the same as removing the cap.
+          //
+          // There used to be a request budget here, defaulting to 8, left
+          // behind when its control was removed. It was unreachable and it
+          // killed a run: smolagents x gpt-oss-120b made 8 clean calls in 191s
+          // and was cut off one request short of an answer. The cap only ever
+          // bit fast stacks — a slow model times out before reaching 8 and
+          // never feels it — so it was quietly biasing the benchmark against
+          // exactly the models worth finding. Spend is bounded by the 30-minute
+          // timeout and the input-token ceiling, which is what the proxy
+          // already argued: a request count says almost nothing about cost.
+          max_model_requests: null,
           max_steps: steps,
           timeout_seconds: 1800,
         },
@@ -515,9 +517,9 @@ export function useWizard() {
   /**
    * Whether any chosen stack is served by a free tier.
    *
-   * Uncapped used to be gated on the single global provider. With a mixed
-   * matrix that would let one OpenRouter stack ride along uncapped inside an
-   * otherwise credit-billed run and quietly spend the daily quota.
+   * Asked per stack, not of one global provider: a mixed matrix otherwise lets
+   * a single OpenRouter stack ride along inside an otherwise credit-billed run
+   * and quietly spend the daily quota without the warning ever appearing.
    */
   const anyFreeTier = stacks.some(
     (s) => (providers.data ?? []).find((p) => p.name === s.provider)?.has_free_tier !== false,
@@ -571,11 +573,7 @@ export function useWizard() {
     anyFreeTier,
     reps,
     setReps,
-    budget,
-    setBudget,
     steps,
-    uncapped,
-    setUncapped,
     setupOpen,
     setSetupOpen,
     showPaid,
