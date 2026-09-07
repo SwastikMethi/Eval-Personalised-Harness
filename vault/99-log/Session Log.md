@@ -12,6 +12,27 @@ Keep entries short: **what changed · why · what it unblocks · what to verify.
 
 ---
 
+## 2026-09-07 — Dry run: grounding engages, and two providers moved under us
+
+**Purpose.** Prove the [[Known Defects]] #30 grounding engages on a live run. `make demo` cannot: it runs the fake harness over a commit fixture and never touches the rubric path.
+
+**Result: the stated check passed.** `evaluation_results.evidence_files` came back `['src/server.py', 'src/tools/battle_simulator.py', 'src/utils/battle_mechanics.py']` — three real source files read and handed to the judge. Grounding is live.
+
+**But no gradeable answer, for an unrelated reason.** `smolagents × openai/gpt-oss-20b` ran 41 steps, 42 requests, 135,084 input / 7,596 output tokens, and then declined: *"I am unable to inspect the repository files."* The step log shows why — repeated `Error in code parsing: expected string or bytes-like object, got 'NoneType'`. The model returns **reasoning-only responses with `content: null`**, which smolagents' parser cannot consume. `proxy.py:347` forwards the provider's `message` verbatim, so this is faithful reporting, not a proxy bug. Same category as the 550B emitting unparseable Python: a harness × model incompatibility, which is what this product exists to surface.
+
+The judge handled it well, and visibly used the grounding: *"The answer appropriately avoids inventing unsupported repository details. It declines the task entirely."* 0 invented, 6 missing, 0.0 — a decline scored as a decline rather than as a wrong answer.
+
+**Two provider facts, both new since 2026-08-18:**
+
+- `openai/gpt-oss-120b` reached **end of life on 2026-09-03** and returns `410 Gone`. Correctly classified non-retryable and filed as `model_provider`, so nothing was wasted and the harness was not blamed.
+- The **~302 s NVIDIA generation ceiling is account-wide, not model-specific**. Six samples now across two models, the two here 29 ms apart: 302,097 ms and 302,126 ms. Both 504s were rescued by the [[Known Defects]] #23 retry and the run reached COMPLETED — the clearest evidence yet that fix earns its keep.
+
+`answer_salvaged` correctly stayed **false**: `final_answer()` was called, so the #27 fallback rightly did not fire.
+
+**Still unanswered.** Whether grounding changes a *good* answer's score. This run never produced one. The cheap way to settle it is an A/B re-grade of the stored answers, which still exist with their rubrics.
+
+---
+
 ## 2026-09-07 — Grading correctness instead of plausibility
 
 **What.** Fixed [[Known Defects]] #30 (the judge graded plausibility) and the clean-exit half of #27 (smolagents discarded answers it had written).
