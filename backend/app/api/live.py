@@ -40,9 +40,7 @@ TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"}
 
 def _snapshot(session: Session, experiment_id: str) -> dict[str, Any]:
     combos = session.scalars(
-        select(ExperimentCombination).where(
-            ExperimentCombination.experiment_id == experiment_id
-        )
+        select(ExperimentCombination).where(ExperimentCombination.experiment_id == experiment_id)
     ).all()
     by_combo = {c.id: c for c in combos}
     runs = (
@@ -116,9 +114,7 @@ async def experiment_events(experiment_id: str) -> StreamingResponse:
                 ).all()
                 run_ids = (
                     session.scalars(
-                        select(BenchmarkRun.id).where(
-                            BenchmarkRun.combination_id.in_(list(combos))
-                        )
+                        select(BenchmarkRun.id).where(BenchmarkRun.combination_id.in_(list(combos)))
                     ).all()
                     if combos
                     else []
@@ -178,11 +174,39 @@ def run_detail(run_id: str, session: Session = Depends(get_session)) -> dict[str
         raise HTTPException(404, "run not found")
     combo = session.get(ExperimentCombination, run.combination_id)
     task = session.get(BenchmarkTask, combo.task_id) if combo else None
-    evaluation = session.scalars(
+
+    # A run answers every task that shared its snapshot, judging the SAME answer
+    # against each rubric — one verdict per task, not one per run. Newest per
+    # task, the same rule results_api uses, so the two surfaces cannot disagree.
+    # Plain ascending order would be wrong for a different reason: a
+    # re-evaluation writes a second row for the same task, and the older one is
+    # not the answer anybody wants.
+    group_task_ids: list[str] = list(combo.task_ids or []) if combo else []
+    if combo and not group_task_ids:
+        group_task_ids = [combo.task_id]
+    latest: dict[str | None, EvaluationResult] = {}
+    for ev in session.scalars(
         select(EvaluationResult)
         .where(EvaluationResult.run_id == run_id)
         .order_by(EvaluationResult.created_at.desc())
-    ).first()
+    ).all():
+        latest.setdefault(ev.task_id, ev)
+    titles = (
+        {
+            t.id: t.title
+            for t in session.scalars(
+                select(BenchmarkTask).where(BenchmarkTask.id.in_(group_task_ids))
+            ).all()
+        }
+        if group_task_ids
+        else {}
+    )
+    # Group order, so the first entry is the one the run summary scored with
+    # (`verdicts[0]`). Rows whose task_id predates per-task evaluation carry
+    # None and are appended rather than dropped.
+    ordered = [latest[tid] for tid in group_task_ids if tid in latest]
+    ordered += [ev for tid, ev in latest.items() if tid not in group_task_ids]
+    evaluation = ordered[0] if ordered else None
     metrics = session.scalars(
         select(ModelRequestMetric)
         .where(ModelRequestMetric.run_id == run_id)
@@ -202,18 +226,35 @@ def run_detail(run_id: str, session: Session = Depends(get_session)) -> dict[str
         "repetition": run.repetition,
         "harness": combo.harness if combo else None,
         "model_id": combo.model_id if combo else None,
-        "task": {"id": task.id, "title": task.title, "prompt": task.prompt} if task else None,
+        "task": (
+            {"id": task.id, "title": task.title, "prompt": task.prompt, "kind": task.kind}
+            if task
+            else None
+        ),
         "error_category": run.error_category,
         "error_message": run.error_message,
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
         "result": result,
         "usage": result.get("usage") or {},
+        # Kept for callers that only ever wanted one verdict; it is now the
+        # group's FIRST task rather than whichever row was written last, which
+        # is what the run's own score was taken from.
         "evaluation": (
             {"signal": evaluation.signal, "score": evaluation.score, "results": evaluation.results}
             if evaluation
             else None
         ),
+        "evaluations": [
+            {
+                "task_id": ev.task_id,
+                "task_title": titles.get(ev.task_id or "") or (task.title if task else None),
+                "signal": ev.signal,
+                "score": ev.score,
+                "results": ev.results,
+            }
+            for ev in ordered
+        ],
         "model_requests": [
             {
                 "http_status": m.http_status,

@@ -136,12 +136,14 @@ describe('Live', () => {
     expect((await screen.findAllByRole('button', { name: /inspect mini-swe-agent/ })).length).toBe(13)
   })
 
-  it('says a run produced no patch rather than showing an empty box', async () => {
+  it('says a run produced nothing rather than showing an empty box', async () => {
+    // The tab covers both deliverables now — a diff or a written answer — so
+    // the empty state names both rather than only the patch.
     mockExperiment()
     const user = userEvent.setup()
     renderScreen(<Live />, '/experiments/e1', '/experiments/:id')
 
     await user.click(await screen.findByRole('button', { name: /inspect mini-swe-agent/ }))
-    expect(await screen.findByText(/No patch produced/)).toBeInTheDocument()
+    expect(await screen.findByText(/No patch and no answer/)).toBeInTheDocument()
   })
 })

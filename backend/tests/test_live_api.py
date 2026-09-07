@@ -279,3 +279,115 @@ async def test_comprehension_tasks_share_one_run_per_stack(
     assert created.status_code == 200, created.text
     # One stack, two tasks, one repetition: one run, not two.
     assert created.json()["runs"] == 1
+
+
+async def _grouped_run(client: httpx.AsyncClient, titles: tuple[str, ...]) -> tuple[str, list[str]]:
+    """A run over several theory tasks that shared one snapshot.
+
+    The verdict rows are written by the tests rather than by a real run: the
+    fixture is not a git repository, so a theory task — which snapshots HEAD —
+    cannot materialise a workspace here. That is fine for what these cover,
+    which is how `run_detail` collates verdicts, not how judging produces them.
+    """
+    repo = (
+        await client.post(
+            "/api/v1/repositories",
+            json={"name": "detailgroup", "source": "local", "path_or_url": str(FIXTURE)},
+        )
+    ).json()
+    tasks = [
+        (
+            await client.post(
+                "/api/v1/tasks",
+                json={
+                    "repository_id": repo["id"],
+                    "kind": "theory",
+                    "title": t,
+                    "prompt": "p",
+                },
+            )
+        ).json()["id"]
+        for t in titles
+    ]
+    exp = (
+        await client.post(
+            "/api/v1/experiments",
+            json={
+                "repository_id": repo["id"],
+                "name": "detailgroup",
+                "task_ids": tasks,
+                "combinations": [
+                    {"harness": "fake", "provider": "fake", "model_id": "fake/deterministic-1:free"}
+                ],
+                "repetitions": 1,
+                "config": {"fixture_path": str(FIXTURE)},
+            },
+        )
+    ).json()
+    progress = await _await_finish(client, exp["id"])
+    return progress["runs"][0]["run_id"], tasks
+
+
+def _verdict(run_id: str, task_id: str, score: float, minutes: int = 0) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from app.db.engine import SessionLocal
+    from app.models import EvaluationResult
+
+    with SessionLocal() as session:
+        session.add(
+            EvaluationResult(
+                run_id=run_id,
+                task_id=task_id,
+                signal="ok",
+                score=score,
+                results={"judge": {"score": score}},
+                created_at=datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=minutes),
+            )
+        )
+        session.commit()
+
+
+async def test_run_detail_returns_one_verdict_per_grouped_task(
+    client: httpx.AsyncClient,
+) -> None:
+    """A grouped run judges the same answer against each task's rubric.
+
+    Returning only one of those verdicts showed a single grade with nothing on
+    screen saying which question it belonged to — and, because the rows were
+    ordered newest-first, it was the LAST task while the run's own score came
+    from the first.
+    """
+    run_id, tasks = await _grouped_run(client, ("first question", "second question"))
+    # Written in reverse so passing cannot depend on insertion order.
+    _verdict(run_id, tasks[1], 0.25, minutes=1)
+    _verdict(run_id, tasks[0], 0.75, minutes=2)
+
+    detail = (await client.get(f"/api/v1/runs/{run_id}/detail")).json()
+
+    assert [e["task_id"] for e in detail["evaluations"]] == tasks, "group order, not write order"
+    assert [e["task_title"] for e in detail["evaluations"]] == [
+        "first question",
+        "second question",
+    ]
+    # The scalar is the group's FIRST task — the one the run's own score came
+    # from — rather than whichever row was written last.
+    assert detail["evaluation"]["score"] == 0.75
+    assert detail["task"]["kind"] == "theory"
+
+
+async def test_run_detail_prefers_the_newest_verdict_per_task(
+    client: httpx.AsyncClient,
+) -> None:
+    """A re-evaluation supersedes rather than doubles.
+
+    Ordering ascending to fix grouping would have reintroduced the opposite
+    bug: the stale row winning for a task that was graded twice.
+    """
+    run_id, tasks = await _grouped_run(client, ("only question",))
+    _verdict(run_id, tasks[0], 0.10, minutes=1)
+    _verdict(run_id, tasks[0], 0.75, minutes=2)
+
+    detail = (await client.get(f"/api/v1/runs/{run_id}/detail")).json()
+    assert len(detail["evaluations"]) == 1, "a re-evaluation is not a second task"
+    assert detail["evaluations"][0]["score"] == 0.75

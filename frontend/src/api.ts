@@ -214,7 +214,7 @@ export interface RunDetail {
   harness: string | null
   model_id: string | null
   repetition: number
-  task: { id: string; title: string; prompt: string } | null
+  task: { id: string; title: string; prompt: string; kind: string } | null
   error_category: string | null
   error_message: string | null
   started_at: string | null
@@ -222,6 +222,16 @@ export interface RunDetail {
   result: Record<string, unknown>
   usage: Record<string, number | boolean>
   evaluation: { signal: string; score: number | null; results: Record<string, any> } | null
+  /** One verdict per task: a grouped run answers several questions from a
+   *  single exploration, so the same answer is graded against each rubric.
+   *  `evaluation` above is this list's first entry, kept for older callers. */
+  evaluations: {
+    task_id: string | null
+    task_title: string | null
+    signal: string
+    score: number | null
+    results: Record<string, any>
+  }[]
   model_requests: {
     http_status: number
     latency_ms: number
