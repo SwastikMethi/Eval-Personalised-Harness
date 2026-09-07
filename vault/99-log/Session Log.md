@@ -12,7 +12,38 @@ Keep entries short: **what changed · why · what it unblocks · what to verify.
 
 ---
 
-## 2026-09-07 — Grounding caught a confident answer inventing behaviour
+## 2026-09-07 — A/B re-grade: no measurable effect, and a score that will not reproduce
+
+**Retraction first.** The previous entry read the 0.25 on run `140415db` as grounding catching a fluent answer inventing behaviour. **That reading does not survive.** Re-grading the identical answer against the identical rubric returns **0.83, five times out of five**, with met=5/missing=1 rather than the recorded met=1/partial=1/missing=4. The 0.25 is not reproducible, so it cannot support the conclusion drawn from it.
+
+**The A/B.** Every stored answer graded twice — grounding off, then on — against its own rubric, read-only, writing nothing.
+
+| run | chars | recorded | OFF | ON | delta |
+|---|---|---|---|---|---|
+| `140415db` | 13,377 | 0.25 | 0.83 | 0.83 | 0.00 |
+| `4215cbab` | 281 | 0.00 | 0.00 | 0.00 | 0.00 |
+| `cf4df358` | 54 | 0.00 | 0.00 | 0.00 | 0.00 |
+| `6e837ea4` | 1,069 | 0.33 | 0.25 | 0.33 | +0.08 |
+| `2c3c761d` | 8,457 | 0.92 | 0.92 | 0.83 | −0.08 |
+| `d3de1516` | 12,709 | 0.67 | 0.67 | 0.75 | +0.08 |
+| `d3de1516` | 12,709 | 0.67 | 0.83 | 0.75 | −0.08 |
+| `056bb647` | 5,132 | 0.50 | 0.58 | 0.25 | **−0.33** |
+
+**Mean delta −0.042 over n=8. No systematic effect.** Six of the eight moved by ≤0.08, and one criterion at partial credit is worth 0.083 — so those are single criteria flipping, not a signal. One genuine drop (−0.33) and no explanation for it beyond a small sample.
+
+**What did hold: the controls.** The 54-, 281- and 1,069-character answers did not improve under grounding. Handing the judge more source does not inflate a thin answer, which was the failure mode most worth guarding against.
+
+**Two bugs in the measurement, both mine, both fixed before the numbers above.** The first A/B run read `result["patch"]`, which does not exist — the patch is an artifact on disk — so for runs whose answer lived in `ANSWER.md` it graded the short `final_message` instead, a different text. The second took whichever evaluation row SQL returned first rather than the newest per task, so `recorded` showed stale zeroes. After fixing both, `recorded` and `OFF` agree closely (0.92→0.92, 0.67→0.67, 0.50→0.58) — which is what says the harness is now grading what the product graded.
+
+**The unresolved part, and it matters more than the A/B.** For `140415db` every recorded field is identical between the product's grading and mine — provider `openai`, model `gpt-5.6-sol`, `evidence_files` the same three paths, `answer_source` `final_message`, 13,377 chars, no error — and the verdicts differ by 0.58. Five repeats give zero spread, so this is not ordinary sampling noise, and nothing we persist explains it. **We do not store enough to reproduce a grading decision.**
+
+That is a measurement-integrity gap, not a grading-quality one, and it blocks the original question: an effect of ±0.08 cannot be resolved by an instrument that can disagree with itself by 0.58 for reasons we cannot see.
+
+**Next, in order.** Pin `ANALYZER_MODEL=gpt-4.1` for grading — [[Known Defects]] #17 records that the gpt-5.x family rejects `temperature=0` and has it silently dropped, so the judge runs at the vendor default while gpt-4.1 honours determinism. Then persist enough of the judge call to reproduce a verdict. Only then is the A/B worth repeating with repetitions.
+
+---
+
+## 2026-09-07 — Grounding caught a confident answer inventing behaviour ⚠️ SUPERSEDED
 
 **The result the whole change was for.** `smolagents × nvidia/nemotron-3-ultra-550b-a55b`, same repo and same task as the gpt-oss-20b attempt. COMPLETED in 229 s, 5 calls, no 504s, a **13,379-character** answer — fluent, sectioned, with code blocks, the kind that reads as authoritative.
 
