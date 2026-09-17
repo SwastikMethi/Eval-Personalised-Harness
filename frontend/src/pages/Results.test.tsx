@@ -117,4 +117,15 @@ describe('Results', () => {
     renderScreen(<Results experimentId="e1" />)
     expect(await screen.findByText(/cohort-relative/)).toBeInTheDocument()
   })
+
+  it('names the threshold instead of calling it success', async () => {
+    // success_rate counts runs scoring >= 0.5. Labelled "success", a
+    // recommended stack showed "0% success" beside an excluded stack at 100%
+    // — both numbers correct, together incoherent.
+    serve(payload())
+    renderScreen(<Results experimentId="e1" />)
+
+    expect(await screen.findByTitle(/scoring 0.50 or higher/)).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'success' })).not.toBeInTheDocument()
+  })
 })

@@ -18,6 +18,7 @@ def sample(
     harness: str = "h",
     model: str = "m",
     task: str = "t1",
+    kind: str = "commit",
 ) -> RunSample:
     return RunSample(
         combination_id=combo,
@@ -30,6 +31,7 @@ def sample(
         duration_s=duration,
         total_tokens=tokens,
         patch_produced=patch,
+        task_kind=kind,
     )
 
 
@@ -58,9 +60,7 @@ def test_majority_timeouts_ineligible() -> None:
 
 
 def test_insufficient_signal_blocks_recommendation() -> None:
-    stats = aggregate_combination(
-        [sample(signal="INSUFFICIENT_EVALUATION_SIGNAL", score=None)]
-    )
+    stats = aggregate_combination([sample(signal="INSUFFICIENT_EVALUATION_SIGNAL", score=None)])
     assert not stats.eligible
 
 
@@ -77,8 +77,7 @@ def test_fast_but_wrong_never_wins() -> None:
         [sample(combo="fw", score=0.0, duration=1.0, tokens=10, harness="fast", model="m1")] * 3
     )
     slow_right = aggregate_combination(
-        [sample(combo="sr", score=1.0, duration=100.0, tokens=5000, harness="slow", model="m2")]
-        * 3
+        [sample(combo="sr", score=1.0, duration=100.0, tokens=5000, harness="slow", model="m2")] * 3
     )
     stats = [fast_wrong, slow_right]
     score_combinations(stats)
@@ -116,3 +115,55 @@ def test_pareto_frontier() -> None:
     assert "a" in frontier  # best correctness
     assert "b" in frontier  # much cheaper, nearly as good
     assert "c" not in frontier  # dominated by b
+
+
+# --- eligibility judges the deliverable the task actually asked for ----------
+#
+# A comprehension task answers in prose and produces no patch by design.
+# Measured on a real experiment: a theory stack scoring 0.92 was excluded as
+# "never produces a patch" while a 0.33 patch-producing stack was recommended
+# in its place — the product's headline output, wrong.
+
+
+def test_a_graded_answer_makes_a_theory_stack_eligible() -> None:
+    stats = aggregate_combination(
+        [
+            sample(kind="theory", patch=False, score=0.92),
+            sample(kind="theory", patch=False, score=0.83),
+        ]
+    )
+    assert stats.eligible, stats.ineligible_reasons
+    assert "never produces a patch" not in stats.ineligible_reasons
+
+
+def test_a_theory_stack_that_answers_nothing_is_still_ineligible() -> None:
+    """The gate must still exclude a stack that produced nothing gradeable."""
+    stats = aggregate_combination(
+        [
+            sample(kind="theory", patch=False, score=None, signal=None, state="TIMED_OUT"),
+            sample(kind="theory", patch=False, score=None, signal=None, state="TIMED_OUT"),
+        ]
+    )
+    assert not stats.eligible
+    assert "never produces a graded answer" in stats.ineligible_reasons
+
+
+def test_commit_tasks_keep_the_patch_rule() -> None:
+    """Changing the theory path must not loosen the rule for a replay."""
+    stats = aggregate_combination([sample(kind="commit", patch=False, score=0.9)])
+    assert not stats.eligible
+    assert "never produces a patch" in stats.ineligible_reasons
+
+
+def test_a_theory_stack_beats_a_patching_one_when_it_scores_higher() -> None:
+    """The reported case end to end: 0.92 theory vs 0.33 commit."""
+    theory = aggregate_combination(
+        [sample(combo="theory", harness="smolagents", kind="theory", patch=False, score=0.92)]
+    )
+    patched = aggregate_combination(
+        [sample(combo="patched", harness="mini-swe-agent", kind="commit", patch=True, score=0.33)]
+    )
+    stats = [theory, patched]
+    score_combinations(stats)
+    recs = recommend(stats)["recommendations"]
+    assert recs["best_quality"]["harness"] == "smolagents"

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.db.engine import get_session
 from app.models import (
     BenchmarkRun,
+    BenchmarkTask,
     EvaluationResult,
     Experiment,
     ExperimentCombination,
@@ -25,10 +26,23 @@ router = APIRouter()
 
 def _samples(session: Session, experiment_id: str) -> list[RunSample]:
     combos = session.scalars(
-        select(ExperimentCombination).where(
-            ExperimentCombination.experiment_id == experiment_id
-        )
+        select(ExperimentCombination).where(ExperimentCombination.experiment_id == experiment_id)
     ).all()
+    # Task kinds for every task any combination covers, fetched once rather
+    # than per run: eligibility judges a patch or a graded answer depending on
+    # what the task actually asked for.
+    task_ids = {t for c in combos for t in (list(c.task_ids or []) or [c.task_id])}
+    kinds: dict[str, str] = (
+        {
+            t.id: t.kind
+            for t in session.scalars(
+                select(BenchmarkTask).where(BenchmarkTask.id.in_(task_ids))
+            ).all()
+        }
+        if task_ids
+        else {}
+    )
+
     samples: list[RunSample] = []
     for combo in combos:
         runs = session.scalars(
@@ -85,13 +99,15 @@ def _samples(session: Session, experiment_id: str) -> list[RunSample]:
                         state=run.state,
                         score=evaluation.score if evaluation else result.get("score"),
                         signal=(
-                            evaluation.signal
-                            if evaluation
-                            else result.get("evaluation_signal")
+                            evaluation.signal if evaluation else result.get("evaluation_signal")
                         ),
                         duration_s=share,
                         total_tokens=token_share or None,
                         patch_produced=bool(result.get("patch_produced")),
+                        # Eligibility asks for the right deliverable per kind:
+                        # a patch for a replay, a graded answer for a
+                        # comprehension task.
+                        task_kind=kinds.get(task_id or combo.task_id, "commit"),
                     )
                 )
     return samples
@@ -115,9 +131,7 @@ def experiment_results(
     recommendations = recommend(stats)
 
     token_points = [
-        (s.combination_id, s.mean_score or 0.0, s.mean_tokens or 0.0)
-        for s in stats
-        if s.eligible
+        (s.combination_id, s.mean_score or 0.0, s.mean_tokens or 0.0) for s in stats if s.eligible
     ]
     duration_points = [
         (s.combination_id, s.mean_score or 0.0, s.mean_duration_s or 0.0)
@@ -292,9 +306,7 @@ def _parallel_caveat(session: Session, experiment_id: str) -> list[str]:
     would cast false doubt on the scores it describes.
     """
     combos = session.scalars(
-        select(ExperimentCombination.id).where(
-            ExperimentCombination.experiment_id == experiment_id
-        )
+        select(ExperimentCombination.id).where(ExperimentCombination.experiment_id == experiment_id)
     ).all()
     if not combos:
         return []

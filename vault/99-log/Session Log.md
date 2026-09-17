@@ -12,6 +12,26 @@ Keep entries short: **what changed · why · what it unblocks · what to verify.
 
 ---
 
+## 2026-09-18 — The recommendation was wrong, and a UI sweep found it
+
+**What.** Fixed [[Known Defects]] #31 (eligibility judged every task on a patch) and #32 (a column labelled `success` that read 0% for the winner).
+
+**Found by QA, not by us.** A sweep of the UI at 1440/1024/768/375 produced 5 blocking, 6 high and ~10 medium findings, each backed by a computed style, DOM check or network log. I verified the blocking five against source: **all five held.** Two are fixed here; the rest are planned.
+
+**#31 is the serious one, and it is mine.** I shipped the theory-task path — grounded rubrics, per-task verdicts, the Output tab — and never revisited `aggregate.py`'s eligibility rule. `all(not s.patch_produced)` is unconditional, and a comprehension task has no patch by design, so **every theory stack was permanently ineligible**. On experiment `27ce581a` the page recommended a **0.33** stack while excluding a **0.92** one as *"never produces a patch"*.
+
+`RunSample` now carries `task_kind`; theory is gated on a graded answer, commit keeps the patch rule. Verified against live data, not just tests: both mini-swe-agent stacks eligible at 0.417 and 0.542, recommendation correctly `nemotron-3-super-120b`, smolagents still excluded but for the honest reason *"more than half of runs time out"*.
+
+**A second half the report did not catch.** `queue.py` reported `verdicts[0]` as the run's score, so Live showed 0.833 where the run's true mean was 0.417 — two screens disagreeing about the same run. Now the mean across answered tasks.
+
+**#32 is a labelling fix, not a maths one.** `success_rate` means "score ≥ 0.5". Renaming the column removes the contradiction without silently redefining what saved comparisons meant.
+
+**Verified.** 427 backend (+4) and 59 frontend (+1) tests, lint, typecheck, demo green. The three new scoring tests were confirmed failing against the old rule — including `assert 'mini-swe-agent' == 'smolagents'`, the exact wrong recommendation from the screenshot, reproduced.
+
+**Still open from the sweep:** repository rows created without validation (15 accumulated, no dedupe, no DELETE), Results not being a URL, the dead sidebar on Run Detail, one-dot Pareto charts, and the responsive/consistency set. Plan is in the plan file.
+
+---
+
 ## 2026-09-07 — A/B with median-of-3: the effect is below the noise floor
 
 Re-ran the A/B with the median-of-3 now in the grading path, applied to both arms — 8 answers × 2 arms × 3 samples, 48 judge calls, read-only.

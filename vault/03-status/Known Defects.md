@@ -291,6 +291,24 @@ The system prompt now instructs that a claim contradicting the source is `missed
 
 **Not claimed:** this does not make the judge infallible. It replaces "sounds plausible" with "consistent with the source it was shown", which is a different and much better measurement — but the judge is still a model, and still not deterministic (Known Defect #17).
 
+## 31. Eligibility judged every task on a patch, so no theory stack could ever win 🔴 ✅ FIXED (2026-09-18)
+
+`aggregate.py:104` read `all(not s.patch_produced for s in samples)` regardless of task kind. A comprehension task answers in prose and produces **no patch by design**, so every theory stack was permanently ineligible and the recommendation fell through to whatever scored worst-but-patched.
+
+Found by a UI QA sweep, not by a test. On experiment `27ce581a` the page recommended `mini-swe-agent × gpt-oss-120b` at **0.33** while excluding a **0.92** smolagents run as *"never produces a patch"* — the product's headline output, wrong, on the one screen it exists to produce.
+
+`RunSample` now carries `task_kind`, populated in `results_api.py` where samples are already built per task. Theory tasks are gated on a **graded answer** (`score is not None and signal == "ok"`); commit replays keep the patch rule untouched. `judge_answer` already returns 0.0 with an explicit error when no answer arrived, so a stack that produced nothing still fails the gate — verified by a test.
+
+Verified against live data after the fix: both mini-swe-agent stacks eligible at 0.417 and 0.542, recommendation correctly `nemotron-3-super-120b`, and the smolagents row still excluded but now for an honest reason — *"more than half of runs time out"*.
+
+**Second half, same defect.** `queue.py` set the run's headline score to `verdicts[0]` — the group's *first* task. The Live card therefore showed **0.833** for a run whose real mean was **0.417**, disagreeing with the Results page about the same run. It now reports the mean across the tasks the run answered; per-task verdicts are still stored individually.
+
+## 32. "SUCCESS 0%" beside a recommendation 🟠 ✅ FIXED (2026-09-18)
+
+`success_rate` counts runs scoring **≥ 0.5** (`aggregate.py:86`). Labelled `success`, the recommended stack read *0% success* while an excluded one read *100%* — two individually correct numbers that together looked like a contradiction, on the page a reader trusts least.
+
+Relabelled to `≥ 0.50` with a title attribute. The maths is unchanged deliberately: it is a meaningful threshold rate, and redefining it would silently change what every saved comparison meant.
+
 **Widened 2026-08-18.** Not only on interruption. A `smolagents × gpt-oss-120b` run exited **cleanly** — `exit_code: 0`, `status: completed`, 19 steps, 321,263 input and 21,146 output tokens — with `final_message` empty. Its stdout tail holds a full, substantive answer written as step prose. `result.output` is populated only by `final_answer()`, so an agent that answers without making that call returns nothing at all. Both models tried so far miss the call: the 550B could not emit parseable Python, gpt-oss-120b simply narrated instead. Three smolagents runs, three zero scores, and in at least two the answer demonstrably existed.
 
 ## 28. Nothing told a shell agent it could stop 🔴 ✅ FIXED (2026-08-18)

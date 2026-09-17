@@ -737,7 +737,19 @@ class QueueWorker:
                     )
                     for tid in group_task_ids
                 ]
-                evaluation = verdicts[0]
+                # The run's headline score is the MEAN across the tasks it
+                # answered, not the first one. Reporting verdicts[0] made the
+                # Live card show 0.833 for a run whose real mean was 0.417 —
+                # the same run the Results page ranked on both tasks, so the
+                # two screens disagreed about the same number. Per-task
+                # verdicts are still stored individually; this is only the
+                # single figure a run-level view can show.
+                graded: list[float] = [
+                    float(v["score"]) for v in verdicts if v.get("score") is not None
+                ]
+                evaluation = dict(verdicts[0])
+                if graded:
+                    evaluation["score"] = sum(graded) / len(graded)
             else:
                 evaluation = await asyncio.to_thread(
                     self._evaluate, run_id, task_id, result.patch, config

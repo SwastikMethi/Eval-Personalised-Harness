@@ -41,6 +41,11 @@ class RunSample:
     duration_s: float | None
     total_tokens: int | None
     patch_produced: bool
+    # What this task asked for, so eligibility can judge the right deliverable.
+    # A comprehension task answers in prose and never produces a patch; scoring
+    # it on one excluded every theory stack that ever ran. Defaults to the
+    # patch-producing kind so an older caller keeps its previous behaviour.
+    task_kind: str = "commit"
 
 
 @dataclass
@@ -83,10 +88,9 @@ def aggregate_combination(samples: list[RunSample]) -> CombinationStats:
     )
     scores = [s.score for s in samples if s.score is not None]
     stats.completed = sum(1 for s in samples if s.state == "COMPLETED")
-    stats.success_rate = (
-        sum(1 for s in samples if s.state == "COMPLETED" and (s.score or 0) >= 0.5)
-        / len(samples)
-    )
+    stats.success_rate = sum(
+        1 for s in samples if s.state == "COMPLETED" and (s.score or 0) >= 0.5
+    ) / len(samples)
     stats.mean_score = _mean(scores)
     stats.median_score = statistics.median(scores) if scores else None
     stats.stdev_score = statistics.stdev(scores) if len(scores) >= 2 else None
@@ -95,13 +99,27 @@ def aggregate_combination(samples: list[RunSample]) -> CombinationStats:
     stats.crash_rate = sum(1 for s in samples if s.state == "FAILED") / len(samples)
     stats.mean_duration_s = _mean([s.duration_s for s in samples if s.duration_s is not None])
     stats.mean_tokens = _mean([float(s.total_tokens) for s in samples if s.total_tokens])
-    stats.insufficient_signal = any(
-        s.signal == "INSUFFICIENT_EVALUATION_SIGNAL" for s in samples
-    )
+    stats.insufficient_signal = any(s.signal == "INSUFFICIENT_EVALUATION_SIGNAL" for s in samples)
     stats.statistically_weak = stats.completed < MIN_REPS_FOR_CONFIDENCE
 
     # Eligibility rules (spec §17)
-    if all(not s.patch_produced for s in samples):
+    #
+    # The deliverable depends on the task. A commit replay answers with a patch;
+    # a comprehension task answers in prose and produces no patch at all, by
+    # design. Judging both on `patch_produced` made every theory stack
+    # permanently ineligible — measured: a run scoring 0.92 was excluded as
+    # "never produces a patch" while a 0.33 patch-producing run was recommended
+    # in its place, which is the headline output of the product being wrong.
+    #
+    # For a theory task the equivalent question is whether an answer arrived and
+    # could be graded. `judge_answer` already returns 0.0 with an explicit error
+    # when there is no answer, and signal is INSUFFICIENT_EVALUATION_SIGNAL when
+    # grading could not happen — so a scored, ok-signalled sample IS the
+    # deliverable, and a stack that produced nothing still fails this gate.
+    if all(s.task_kind == "theory" for s in samples):
+        if not any(s.score is not None and s.signal == "ok" for s in samples):
+            stats.ineligible_reasons.append("never produces a graded answer")
+    elif all(not s.patch_produced for s in samples):
         stats.ineligible_reasons.append("never produces a patch")
     if stats.timeout_rate > 0.5:
         stats.ineligible_reasons.append("more than half of runs time out")
@@ -157,9 +175,7 @@ def score_combinations(
                 "token_efficiency": token_eff * gate,
                 "resource_efficiency": exec_eff * gate,
             }
-            stat.weighted_score = sum(
-                weights[k] * v for k, v in stat.components.items()
-            )
+            stat.weighted_score = sum(weights[k] * v for k, v in stat.components.items())
 
 
 def pareto_frontier(
@@ -197,9 +213,7 @@ def recommend(all_stats: list[CombinationStats]) -> dict[str, Any]:
                 "tasks": len(group),
                 "completed_reps": sum(g.completed for g in group),
                 "correctness": _mean([g.mean_score or 0.0 for g in eligible]) or 0.0,
-                "reliability": _mean(
-                    [g.components.get("reliability", 0.0) for g in eligible]
-                )
+                "reliability": _mean([g.components.get("reliability", 0.0) for g in eligible])
                 or 0.0,
                 "efficiency": _mean(
                     [g.components.get("execution_efficiency", 0.0) for g in eligible]
@@ -209,11 +223,8 @@ def recommend(all_stats: list[CombinationStats]) -> dict[str, Any]:
                 "avg_duration_s": _mean(
                     [g.mean_duration_s for g in eligible if g.mean_duration_s is not None]
                 ),
-                "avg_tokens": _mean(
-                    [g.mean_tokens for g in eligible if g.mean_tokens is not None]
-                ),
-                "failure_rate": _mean([g.crash_rate + g.timeout_rate for g in eligible])
-                or 0.0,
+                "avg_tokens": _mean([g.mean_tokens for g in eligible if g.mean_tokens is not None]),
+                "failure_rate": _mean([g.crash_rate + g.timeout_rate for g in eligible]) or 0.0,
                 "statistically_weak": any(g.statistically_weak for g in eligible),
             }
         return out

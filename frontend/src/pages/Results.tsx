@@ -335,7 +335,13 @@ export default function Results({
               <tr>
                 <th style={th}>stack</th>
                 <th style={thr}>runs</th>
-                <th style={thr}>success</th>
+                {/* Not "success": this counts runs scoring at or above 0.5,
+                    so a recommended stack could read "0% success" while an
+                    excluded one read 100% — two correct numbers that together
+                    looked like a contradiction. Name the threshold instead. */}
+                <th style={thr} title="share of runs scoring 0.50 or higher">
+                  ≥ 0.50
+                </th>
                 <th style={thr}>score</th>
                 <th style={thr}>σ</th>
                 <th style={thr}>empty patch</th>
