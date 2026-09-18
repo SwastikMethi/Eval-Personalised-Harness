@@ -309,6 +309,18 @@ Verified against live data after the fix: both mini-swe-agent stacks eligible at
 
 Relabelled to `≥ 0.50` with a title attribute. The maths is unchanged deliberately: it is a meaningful threshold rate, and redefining it would silently change what every saved comparison meant.
 
+## 33. The live tile showed a frozen score that no longer matched Results 🟠 ✅ FIXED (2026-09-18)
+
+Fixing #31 in `queue.py` corrected what gets *written* when a run ends — and nothing else. `_snapshot` reads `run.result["score"]`, a value stamped once at completion, so every run that had already finished kept displaying the old `verdicts[0]`: **0.833** on the tile against **0.417** on Results, for the same run. Caught by the user asking whether the tile had actually been corrected; it had not.
+
+The tile now derives each run's score from its `EvaluationResult` rows — newest-per-task, then the mean across tasks, reusing the rule `results_api` already applies. Verified on the real experiment with no backfill: tile and Results now read 0.4167 / 0.5417 / 0.0 identically, row for row.
+
+The point is the class, not the instance. A stored display value can drift from the data it summarises the moment anything is re-evaluated; a derived one cannot. `run.result["score"]` is still written for the API record, but no surface trusts it as the number to show.
+
+Pinned by three tests, two of them confirmed failing against the frozen field. One covers a run carrying **six verdict rows for two tasks** — a mean over rows rather than tasks would have triple-counted the re-graded one.
+
+**Checked and found already correct:** the plan also proposed stopping `aggregate.py` reporting `0.0` for a stack that produced nothing. `_mean([])` already returns `None`, and the smolagents `0.0` turned out to be a genuine judged score (`signal='ok'`) — the judge ran on a timed-out run that produced no answer and scored it zero. No change made; the distinction the rule protects was already intact.
+
 **Widened 2026-08-18.** Not only on interruption. A `smolagents × gpt-oss-120b` run exited **cleanly** — `exit_code: 0`, `status: completed`, 19 steps, 321,263 input and 21,146 output tokens — with `final_message` empty. Its stdout tail holds a full, substantive answer written as step prose. `result.output` is populated only by `final_answer()`, so an agent that answers without making that call returns nothing at all. Both models tried so far miss the call: the 550B could not emit parseable Python, gpt-oss-120b simply narrated instead. Three smolagents runs, three zero scores, and in at least two the answer demonstrably existed.
 
 ## 28. Nothing told a shell agent it could stop 🔴 ✅ FIXED (2026-08-18)

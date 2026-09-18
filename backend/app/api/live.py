@@ -38,6 +38,45 @@ POLL_INTERVAL_S = 1.0
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"}
 
 
+def _scores_from_verdicts(
+    session: Session, run_ids: list[str]
+) -> dict[str, float | None]:
+    """Each run's score, computed from its stored verdicts.
+
+    NOT `run.result["score"]`. That field is written once when the run ends, so
+    anything wrong at that moment is frozen into the UI forever — and something
+    was: it held `verdicts[0]`, the group's FIRST task, so a run whose two tasks
+    scored 0.833 and 0.0 displayed 0.833 while the results page ranked it on the
+    true mean of 0.417. Two screens, two numbers, one run.
+
+    Deriving it here fixes every historical run without a backfill, and removes
+    the class of bug rather than the instance: there is now one source for both
+    surfaces, so they cannot disagree again.
+
+    Newest-per-task, the same rule `results_api` applies — a re-evaluation
+    supersedes rather than doubles. Measured: one run carried six verdict rows
+    for two tasks, so a naive mean over rows would have been wrong.
+    """
+    if not run_ids:
+        return {}
+    rows = session.scalars(
+        select(EvaluationResult)
+        .where(EvaluationResult.run_id.in_(run_ids))
+        .order_by(EvaluationResult.created_at.desc())
+    ).all()
+    latest: dict[str, dict[str | None, EvaluationResult]] = {}
+    for ev in rows:
+        latest.setdefault(ev.run_id, {}).setdefault(ev.task_id, ev)
+
+    out: dict[str, float | None] = {}
+    for run_id in run_ids:
+        graded = [e.score for e in latest.get(run_id, {}).values() if e.score is not None]
+        # None, not 0.0: a run with no verdict has no score, it did not score
+        # zero (CLAUDE.md §4 — never fabricate a metric).
+        out[run_id] = sum(graded) / len(graded) if graded else None
+    return out
+
+
 def _snapshot(session: Session, experiment_id: str) -> dict[str, Any]:
     combos = session.scalars(
         select(ExperimentCombination).where(ExperimentCombination.experiment_id == experiment_id)
@@ -51,6 +90,7 @@ def _snapshot(session: Session, experiment_id: str) -> dict[str, Any]:
         else []
     )
     states = [r.state for r in runs]
+    scores = _scores_from_verdicts(session, [r.id for r in runs])
     rows = []
     for run in runs:
         combo = by_combo[run.combination_id]
@@ -77,7 +117,9 @@ def _snapshot(session: Session, experiment_id: str) -> dict[str, Any]:
                 "output_tokens": usage.get("output_tokens"),
                 "rate_limited": usage.get("rate_limited", False),
                 "budget_exhausted": usage.get("budget_exhausted", False),
-                "score": (run.result or {}).get("score"),
+                # From the verdict rows, not run.result["score"] — see
+                # _scores_from_verdicts.
+                "score": scores.get(run.id),
                 "patch_produced": (run.result or {}).get("patch_produced"),
             }
         )

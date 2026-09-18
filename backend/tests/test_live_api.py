@@ -328,6 +328,18 @@ async def _grouped_run(client: httpx.AsyncClient, titles: tuple[str, ...]) -> tu
     return progress["runs"][0]["run_id"], tasks
 
 
+def _experiment_of(run_id: str) -> str:
+    from app.db.engine import SessionLocal
+    from app.models import BenchmarkRun, ExperimentCombination
+
+    with SessionLocal() as session:
+        run = session.get(BenchmarkRun, run_id)
+        assert run is not None
+        combo = session.get(ExperimentCombination, run.combination_id)
+        assert combo is not None
+        return combo.experiment_id
+
+
 def _verdict(run_id: str, task_id: str, score: float, minutes: int = 0) -> None:
     from datetime import UTC, datetime, timedelta
 
@@ -391,3 +403,46 @@ async def test_run_detail_prefers_the_newest_verdict_per_task(
     detail = (await client.get(f"/api/v1/runs/{run_id}/detail")).json()
     assert len(detail["evaluations"]) == 1, "a re-evaluation is not a second task"
     assert detail["evaluations"][0]["score"] == 0.75
+
+
+# --- the live tile shows the same number the results page ranks on -----------
+
+
+async def _tile_score(client: httpx.AsyncClient, exp_id: str) -> float | None:
+    progress = (await client.get(f"/api/v1/experiments/{exp_id}/progress")).json()
+    return progress["runs"][0]["score"]
+
+
+async def test_the_tile_means_across_tasks_rather_than_showing_the_first(
+    client: httpx.AsyncClient,
+) -> None:
+    """Measured: a run whose tasks scored 0.833 and 0.0 displayed 0.833 on the
+    tile while the results page ranked it on 0.417 — two screens, one run, two
+    numbers. The tile read run.result["score"], frozen at verdicts[0]."""
+    run_id, tasks = await _grouped_run(client, ("first", "second"))
+    exp_id = _experiment_of(run_id)
+    _verdict(run_id, tasks[0], 0.8333, minutes=1)
+    _verdict(run_id, tasks[1], 0.0, minutes=2)
+
+    assert await _tile_score(client, exp_id) == pytest.approx(0.4167, abs=1e-3)
+
+
+async def test_the_tile_counts_a_re_evaluated_task_once(
+    client: httpx.AsyncClient,
+) -> None:
+    """One real run carried six verdict rows for two tasks. A mean over rows
+    rather than over tasks would weight the re-graded task three times."""
+    run_id, tasks = await _grouped_run(client, ("first", "second"))
+    exp_id = _experiment_of(run_id)
+    _verdict(run_id, tasks[0], 0.10, minutes=1)
+    _verdict(run_id, tasks[0], 1.00, minutes=2)  # supersedes the 0.10
+    _verdict(run_id, tasks[1], 0.00, minutes=3)
+
+    assert await _tile_score(client, exp_id) == pytest.approx(0.5), "newest per task, then mean"
+
+
+async def test_an_ungraded_run_has_no_tile_score(client: httpx.AsyncClient) -> None:
+    """None, not 0.0 — a run with no verdict has no score, it did not score
+    zero (CLAUDE.md §4: never fabricate a metric)."""
+    run_id, _tasks = await _grouped_run(client, ("first",))
+    assert await _tile_score(client, _experiment_of(run_id)) is None

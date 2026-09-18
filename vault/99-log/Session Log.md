@@ -12,6 +12,20 @@ Keep entries short: **what changed · why · what it unblocks · what to verify.
 
 ---
 
+## 2026-09-18 — The tile was still wrong, because the fix only touched writes
+
+**Prompted by the user asking whether the tile score had actually been corrected.** It had not. Fixing [[Known Defects]] #31 changed `queue.py`, which runs when a run *ends* — so every already-finished run kept its frozen `verdicts[0]`. The tile still read **0.833** where Results read **0.417**, on the same run.
+
+**Fixed as [[Known Defects]] #33 by deriving rather than storing.** `_snapshot` now computes each run's score from its verdict rows, newest-per-task then mean. No backfill: the historical run corrected itself the moment the read path changed. Verified live — tile and Results now agree row for row at 0.4167 / 0.5417 / 0.0, and `best_balanced` stays `nemotron-3-super-120b`.
+
+The lesson worth keeping: a stored display value drifts from its source the moment anything is re-evaluated. Two screens showing one number should compute it, not copy it.
+
+**One planned change was dropped after checking.** The plan said `aggregate.py` fabricated `0.0` for stacks that produced nothing. It does not — `_mean([])` already returns `None`, verified by running it. The smolagents `0.0` is a real judged score with `signal='ok'`: the judge graded a timed-out run that produced no answer and scored it zero. Assumption corrected before writing code rather than after.
+
+**Verified.** 430 backend and 59 frontend tests, lint, typecheck, demo green. Two of the three new tests confirmed failing against the frozen field.
+
+---
+
 ## 2026-09-18 — The recommendation was wrong, and a UI sweep found it
 
 **What.** Fixed [[Known Defects]] #31 (eligibility judged every task on a patch) and #32 (a column labelled `success` that read 0% for the winner).
